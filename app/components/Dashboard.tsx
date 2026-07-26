@@ -697,17 +697,17 @@ function PcaScatter() {
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-scatter" role="img" aria-label="Scatter PCA dari sampel nasabah yang di-stratifikasi.">
         {pts.filter((p) => !p.o).map((p, i) => {
           let visible = true;
-          if (mode === "cluster_paid" && p.t) visible = false;
-          if (mode === "cluster_def" && !p.t) visible = false;
+          if (mode === "cluster_paid" && p.t === 1) visible = false;
+          if (mode === "cluster_def" && p.t === 0) visible = false;
           
           let isH = false;
           if (mode === "outcome") {
-            isH = h === null || (h === "def" ? p.t : h === "paid" ? !p.t : false);
+            isH = h === null || (h === "def" ? p.t === 1 : h === "paid" ? p.t === 0 : false);
           } else {
             isH = h === null || p.c === h;
           }
           return (
-            <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t ? "#FF6B6B" : "#1FB894") : (CLUSTERCOL[p.c] || "#8A90A6")} opacity={!visible ? "0" : isH ? "0.6" : "0.05"} />
+            <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t === 1 ? "#FF6B6B" : "#1FB894") : (CLUSTERCOL[p.c] || "#8A90A6")} opacity={!visible ? "0" : isH ? "0.6" : "0.05"} />
           );
         })}
         {pts.filter((p) => p.o).map((p, i) => (
