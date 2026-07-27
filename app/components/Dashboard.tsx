@@ -2,9 +2,9 @@
 
 /**
  * Dashboard — Home Credit risk analytics (v2 data).
- * Style: modern dark "analytics SaaS" — light lavender page, a floating dark-navy rounded
- * shell, a top nav bar, KPI cards with delta chips, solid-color accents, and rich
- * charts (donut, vertical bars with tooltip, dumbbell). Per-phase via the nav links.
+ * Style: light "eco-analytics SaaS" — sage page background, a dark sidebar with
+ * per-tab nav, KPI cards (one dark feature card + sparkline motifs), and rich
+ * charts (donut, vertical bars with tooltip, dumbbell). Per-phase via the sidebar.
  *
  * Figures trace to v2 outputs (phase1–4 reports + output/*.csv). No external chart libraries.
  */
@@ -67,11 +67,12 @@ const METHODS = [
 ];
 const TABS = [
   { id: "overview", label: "Overview", title: "Portofolio Overview", kicker: "Apa yang memprediksi kredit macet, dalam satu layar" },
+  { id: "about", label: "About Dataset", title: "About Dataset", kicker: "Gambaran umum dataset Home Credit Default Risk" },
   { id: "phase1", label: "Preprocessing", title: "Fase 1 · Preprocessing Data", kicker: "Membuat data mentah tepercaya" },
   { id: "phase2", label: "Clustering", title: "Fase 2 · Clustering", kicker: "Yang lunas vs yang gagal bayar" },
   { id: "phase3", label: "Association Rules", title: "Fase 3 · Association Rules", kicker: "Kombinasi yang menandakan risiko" },
   { id: "phase4", label: "Outlier", title: "Fase 4 · Outlier", kicker: "Deteksi kredit yang tak lazim" },
-  { id: "dictionary", label: "Kamus & Aturan", title: "Kamus Fitur & Aturan", kicker: "Glosarium fitur dan penjelasan lengkap aturan asosiasi" },
+  { id: "dictionary", label: "Rules & Directory", title: "Rules & Features Directory", kicker: "Glosarium fitur dan penjelasan lengkap aturan asosiasi" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -83,6 +84,12 @@ const KPIS: Record<TabId, Kpi[]> = {
     { label: "Lunas", value: "282,686", icon: "check", chip: { tone: "up", text: "91,9% dari buku" } },
     { label: "Gagal bayar", value: "24,825", icon: "alert", chip: { tone: "down", text: "8,1% dari buku" } },
     { label: "Antrean review", value: "3,983", icon: "target", chip: { tone: "warn", text: "review manual" } },
+  ],
+  about: [
+    { label: "Tabel dataset", value: "8", icon: "layers", chip: { tone: "flat", text: "saling terhubung relasional" } },
+    { label: "Kunci penghubung", value: "3", icon: "target", chip: { tone: "flat", text: "SK_ID_CURR / BUREAU / PREV" } },
+    { label: "Kolom dideskripsikan", value: "219", icon: "chart", chip: { tone: "flat", text: "HomeCredit_columns_description" } },
+    { label: "Baris tabel inti", value: "307,511", icon: "users", chip: { tone: "flat", text: "application_train" } },
   ],
   phase1: [
     { label: "Baris data kredit", value: "307,511", icon: "users", chip: { tone: "flat", text: "baris disimpan" } },
@@ -116,6 +123,65 @@ const KPIS: Record<TabId, Kpi[]> = {
   ],
 };
 
+const DATASET_FILES = [
+  { file: "application_train.csv", rows: "307.511", role: "Tabel inti — 1 baris/nasabah, punya TARGET" },
+  { file: "application_test.csv", rows: "48.744", role: "Tabel inti tanpa TARGET (untuk submission Kaggle)" },
+  { file: "bureau.csv", rows: "1.716.428", role: "Kredit nasabah di lembaga lain (biro kredit)" },
+  { file: "bureau_balance.csv", rows: "27.299.925", role: "Saldo bulanan tiap kredit di bureau" },
+  { file: "previous_application.csv", rows: "1.670.214", role: "Aplikasi pinjaman sebelumnya di Home Credit" },
+  { file: "POS_CASH_balance.csv", rows: "10.001.358", role: "Saldo bulanan pinjaman POS/cash Home Credit" },
+  { file: "credit_card_balance.csv", rows: "3.840.312", role: "Saldo bulanan kartu kredit Home Credit" },
+  { file: "installments_payments.csv", rows: "13.605.401", role: "Riwayat pembayaran angsuran Home Credit" },
+];
+
+const RELATION_KEYS = [
+  { key: "SK_ID_CURR", color: "#16A34A", desc: "ID nasabah/aplikasi saat ini — kunci utama tabel inti (application).", files: ["application_train.csv", "application_test.csv", "bureau.csv", "previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
+  { key: "SK_ID_BUREAU", color: "#9B5DE5", desc: "ID satu kredit di biro kredit eksternal — penghubung bureau ↔ bureau_balance.", files: ["bureau.csv", "bureau_balance.csv"] },
+  { key: "SK_ID_PREV", color: "#F5A524", desc: "ID satu aplikasi/kredit Home Credit sebelumnya — penghubung previous_application ↔ POS/CC/installments.", files: ["previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
+];
+
+const REL_NODES: Record<string, { x: number; y: number; w: number; h: number; label: string }> = {
+  app: { x: 280, y: 18, w: 210, h: 42, label: "application_{train|test}" },
+  bureau: { x: 84, y: 114, w: 160, h: 42, label: "bureau" },
+  prev: { x: 386, y: 114, w: 200, h: 42, label: "previous_application" },
+  bbal: { x: 54, y: 212, w: 190, h: 42, label: "bureau_balance" },
+  pos: { x: 288, y: 212, w: 138, h: 42, label: "POS_CASH_balance" },
+  cc: { x: 448, y: 212, w: 148, h: 42, label: "credit_card_balance" },
+  inst: { x: 618, y: 212, w: 158, h: 42, label: "installments_payments" },
+};
+const REL_EDGES: { from: string; to: string; key: string }[] = [
+  { from: "app", to: "bureau", key: "SK_ID_CURR" },
+  { from: "app", to: "prev", key: "SK_ID_CURR" },
+  { from: "bureau", to: "bbal", key: "SK_ID_BUREAU" },
+  { from: "prev", to: "pos", key: "SK_ID_PREV" },
+  { from: "prev", to: "cc", key: "SK_ID_PREV" },
+  { from: "prev", to: "inst", key: "SK_ID_PREV" },
+];
+const KEYCOLOR: Record<string, string> = { SK_ID_CURR: "#16A34A", SK_ID_BUREAU: "#9B5DE5", SK_ID_PREV: "#F5A524" };
+
+const RELATION_CARDINALITY = [
+  { rel: "application → bureau", card: "1 nasabah : rata-rata 5,6 kredit eksternal (maks 116)", proof: "1,72 jt baris untuk 305.811 nasabah" },
+  { rel: "bureau → bureau_balance", card: "1 kredit : banyak bulan", proof: "27,3 jt baris (tabel terbesar)" },
+  { rel: "application → previous_application", card: "1 nasabah : 0, 1, 2, … aplikasi lampau", proof: "1,67 jt baris" },
+  { rel: "previous_application → POS/CC/installments", card: "1 kredit lampau : banyak bulan/angsuran", proof: "10 jt / 3,8 jt / 13,6 jt baris" },
+];
+
+const CONVENTIONS = [
+  { title: "Kolom DAYS_* bernilai negatif", desc: "Dihitung relatif ke hari aplikasi. Contoh: DAYS_BIRTH = −12000 → berumur ~32,9 th; DAYS_EMPLOYED = −365 → mulai kerja 1 th lalu." },
+  { title: "Sentinel 365243 pada DAYS_EMPLOYED", desc: "Nilai positif ~1000 tahun yang mustahil — kode 'tidak bekerja' (mayoritas pensiunan). Ditangani khusus di Fase 1 (jadi NaN + flag)." },
+  { title: "MONTHS_BALANCE (tabel bulanan)", desc: "Bulan relatif: −1 = snapshot terbaru, −2 = dua bulan lalu, dan seterusnya." },
+  { title: "SK_DPD / STATUS", desc: "DPD = Days Past Due (hari keterlambatan). Makin besar makin parah." },
+  { title: "Kolom moneter (AMT_*)", desc: "Sangat right-skewed (ekor panjang) → di Fase 1 di-winsorize." },
+  { title: "Kolom FLAG_*", desc: "Biner 1/0 (Ya/Tidak)." },
+];
+
+const PIPELINE_STEPS = [
+  { n: "1", title: "Cleaning", desc: "Imputasi missing, tangani anomali (365243, XNA), buang kolom >50% kosong, winsorize kolom moneter." },
+  { n: "2", title: "Feature Engineering", desc: "Tiap tabel pendukung diagregasi ke level SK_ID_CURR (count/mean/max/sum; one-hot → mean/sum) lalu di-left join → train_master (307.511 × 573). Prefix BURO_/PREV_/POS_/CC_/INST_ menandai sumbernya." },
+  { n: "3", title: "Encoding + Feature Selection", desc: "Menghasilkan 185 fitur terpilih dari 573 kandidat." },
+  { n: "4", title: "Output", desc: "Dua dataset akhir: numerik (untuk clustering) dan kategorikal (untuk Apriori / association rules)." },
+];
+
 /* ============================ HELPERS ============================ */
 
 const fmt = (n: number) => n.toLocaleString("en-US");
@@ -128,6 +194,16 @@ function Icon({ name }: { name: string }) {
     target: <><circle cx="8" cy="8" r="5.6" /><circle cx="8" cy="8" r="2.4" /></>,
     layers: <><path d="M8 2.2l6 3.2-6 3.2-6-3.2z" /><path d="M2 9.2l6 3.2 6-3.2" /></>,
     chart: <><path d="M2.4 13.6V7.6M6.2 13.6V3.4M10 13.6V9M13.6 13.6V5.6" /></>,
+    grid: <><rect x="2" y="2" width="4.6" height="4.6" rx="1.1" /><rect x="9.4" y="2" width="4.6" height="4.6" rx="1.1" /><rect x="2" y="9.4" width="4.6" height="4.6" rx="1.1" /><rect x="9.4" y="9.4" width="4.6" height="4.6" rx="1.1" /></>,
+    info: <><circle cx="8" cy="8" r="5.6" /><path d="M8 7.3v4M8 5.1v.15" /></>,
+    filter: <><path d="M2.2 3.2h11.6M4.6 8h6.8M6.7 12.8h2.6" /></>,
+    cluster: <><circle cx="6" cy="6.4" r="3.1" /><circle cx="10.3" cy="9.7" r="3.1" /></>,
+    link: <><path d="M6.3 9.7L9.7 6.3" /><path d="M6.9 4.5l.9-.9a2.6 2.6 0 013.6 3.6l-.9.9" /><path d="M9.1 11.5l-.9.9a2.6 2.6 0 01-3.6-3.6l.9-.9" /></>,
+    search: <><circle cx="6.9" cy="6.9" r="4.3" /><path d="M10.2 10.2L14 14" /></>,
+    book: <><path d="M2.4 3.6c1.6-.8 3.7-.8 5.6.2v8.8c-1.9-1-4-1-5.6-.2z" /><path d="M13.6 3.6c-1.6-.8-3.7-.8-5.6.2v8.8c1.9-1 4-1 5.6-.2z" /></>,
+    bell: <><path d="M8 2.4c-1.9 0-3 1.6-3 3.6 0 3.5-1.3 4.1-1.3 4.7h8.6c0-.6-1.3-1.2-1.3-4.7 0-2-1.1-3.6-3-3.6z" /><path d="M6.6 13a1.5 1.5 0 002.8 0" /></>,
+    chevronDown: <path d="M4 6.2l4 4 4-4" />,
+    plus: <path d="M8 2.6v10.8M2.6 8h10.8" />,
   };
   return (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
@@ -141,13 +217,31 @@ function DeltaChip({ chip }: { chip: Chip }) {
   return <span className={`cx-chip cx-chip-${chip.tone}`}>{arrow && <b>{arrow}</b>}{chip.text}</span>;
 }
 
+const SPARK: Record<Chip["tone"], number[]> = {
+  up: [28, 38, 34, 48, 42, 58, 52, 72, 64, 86],
+  down: [82, 70, 76, 58, 64, 46, 50, 32, 38, 20],
+  warn: [46, 60, 40, 56, 38, 62, 42, 66, 36, 54],
+  flat: [50, 55, 47, 52, 46, 54, 48, 52, 47, 51],
+};
+
+function Spark({ tone }: { tone: Chip["tone"] }) {
+  return (
+    <div className={`cx-spark cx-spark-${tone}`} aria-hidden="true">
+      {SPARK[tone].map((h, i) => <span key={i} style={{ height: `${h}%` }} />)}
+    </div>
+  );
+}
+
 function KpiRow({ items }: { items: Kpi[] }) {
   return (
     <div className="cx-kpis">
-      {items.map((k) => (
-        <div key={k.label} className="cx-kpi">
+      {items.map((k, i) => (
+        <div key={k.label} className={`cx-kpi ${i === 0 ? "cx-kpi-feature" : ""}`}>
           <div className="cx-kpi-top"><span className="cx-kpi-label">{k.label}</span><span className="cx-kpi-icon"><Icon name={k.icon} /></span></div>
-          <div className="cx-kpi-val">{k.value}</div>
+          <div className="cx-kpi-body">
+            <div className="cx-kpi-val">{k.value}</div>
+            <Spark tone={k.chip.tone} />
+          </div>
           <DeltaChip chip={k.chip} />
         </div>
       ))}
@@ -261,8 +355,8 @@ function Dumbbell() {
               <text x={AX0 - 16} y={y - 3} className="cx-svg-prof" textAnchor="end" style={{ opacity: on || h === null ? 1 : 0.5 }}>{p.profile}</text>
               <text x={AX0 - 16} y={y + 12} className="cx-svg-profsub" textAnchor="end">{p.ratio} · {p.paid.id} vs {p.def.id}</text>
               <line x1={xd} y1={y} x2={xp} y2={y} stroke={on ? "#7C8AA8" : "#333A52"} strokeWidth={on ? 3 : 2} />
-              <circle cx={xd} cy={y} r={on ? 9 : 8} fill="#FF6B6B" stroke="#141828" strokeWidth="2.5" />
-              <circle cx={xp} cy={y} r={on ? 9 : 8} fill="#1FB894" stroke="#141828" strokeWidth="2.5" />
+              <circle cx={xd} cy={y} r={on ? 9 : 8} fill="#FF6B6B" stroke="#fff" strokeWidth="2.5" />
+              <circle cx={xp} cy={y} r={on ? 9 : 8} fill="#1FB894" stroke="#fff" strokeWidth="2.5" />
               <text x={xd - 14} y={y + 4} className="cx-svg-val" textAnchor="end" fill="#FF6B6B">{p.def.v.toFixed(2)}</text>
               <text x={xp + 14} y={y + 4} className="cx-svg-val" textAnchor="start" fill="#1FB894">{p.paid.v.toFixed(2)}</text>
               <text x={W - 6} y={y - 3} className="cx-svg-delta" textAnchor="end">{p.dScore} skor</text>
@@ -496,11 +590,11 @@ function ClusterMap() {
         {[0.4, 0.5, 0.6].map((g) => <text key={g} x={X0 - 8} y={py(g) + 3} className="cx-svg-tick" textAnchor="end">{g.toFixed(1)}</text>)}
         {[2, 4, 6].map((g) => <text key={g} x={px(g)} y={Y1 + 16} className="cx-svg-tick" textAnchor="middle">{g}×</text>)}
         {PAIR_IDX.map(([p, d]) => (
-          <line key={p} x1={px(PROFILES[p].CI)} y1={py(PROFILES[p].EXT2)} x2={px(PROFILES[d].CI)} y2={py(PROFILES[d].EXT2)} stroke="#3a3f55" strokeWidth="1.4" strokeDasharray="3 4" />
+          <line key={p} x1={px(PROFILES[p].CI)} y1={py(PROFILES[p].EXT2)} x2={px(PROFILES[d].CI)} y2={py(PROFILES[d].EXT2)} stroke="#D8DFCE" strokeWidth="1.4" strokeDasharray="3 4" />
         ))}
         {PROFILES.map((p, i) => (
           <g key={p.id} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)} style={{ cursor: "pointer" }}>
-            <circle cx={px(p.CI)} cy={py(p.EXT2)} r={rOf(p.count)} fill={p.book === "default" ? "#FF6B6B" : "#1FB894"} opacity={h === null || h === i ? 0.9 : 0.45} stroke="#141828" strokeWidth="2" />
+            <circle cx={px(p.CI)} cy={py(p.EXT2)} r={rOf(p.count)} fill={p.book === "default" ? "#FF6B6B" : "#1FB894"} opacity={h === null || h === i ? 0.9 : 0.45} stroke="#fff" strokeWidth="2" />
             <text x={px(p.CI)} y={py(p.EXT2) + 4} className="cx-cmap-id" textAnchor="middle">{p.id}</text>
           </g>
         ))}
@@ -530,9 +624,9 @@ function Radar() {
       </div>
       <svg viewBox="0 0 360 300" className="cx-radar" role="img" aria-label="Radar membandingkan sepasang kembar antar-feature.">
         {[0.33, 0.66, 1].map((g) => (
-          <path key={g} d={"M " + FEATS.map((_, i) => `${cx + g * RAD * Math.cos(ang(i))},${cy + g * RAD * Math.sin(ang(i))}`).join(" L ") + " Z"} fill="none" stroke="#282E42" strokeWidth="1" />
+          <path key={g} d={"M " + FEATS.map((_, i) => `${cx + g * RAD * Math.cos(ang(i))},${cy + g * RAD * Math.sin(ang(i))}`).join(" L ") + " Z"} fill="none" stroke="#D8DFCE" strokeWidth="1" />
         ))}
-        {FEATS.map((f, i) => <line key={f.key} x1={cx} y1={cy} x2={cx + RAD * Math.cos(ang(i))} y2={cy + RAD * Math.sin(ang(i))} stroke="#282E42" strokeWidth="1" />)}
+        {FEATS.map((f, i) => <line key={f.key} x1={cx} y1={cy} x2={cx + RAD * Math.cos(ang(i))} y2={cy + RAD * Math.sin(ang(i))} stroke="#D8DFCE" strokeWidth="1" />)}
         <path d={poly(def)} fill="#FF6B6B" fillOpacity="0.18" stroke="#FF6B6B" strokeWidth="2" />
         <path d={poly(paid)} fill="#1FB894" fillOpacity="0.16" stroke="#1FB894" strokeWidth="2" />
         {FEATS.map((f, i) => {
@@ -563,13 +657,13 @@ function ElbowChart() {
       </div>
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-elbow" role="img" aria-label="Elbow dan silhouette menurut jumlah cluster.">
         <line x1={px(3)} y1={Y0} x2={px(3)} y2={Y1} stroke="#5B8DEF" strokeWidth="1.4" strokeDasharray="4 4" opacity="0.7" />
-        <text x={px(3)} y={Y0 - 8} className="cx-svg-tick" textAnchor="middle" fill="#8FB0FF">K terpilih = 3</text>
+        <text x={px(3)} y={Y0 - 8} className="cx-svg-tick" textAnchor="middle" fill="#0F7A3D">K terpilih = 3</text>
         <path d={"M " + d.map((r) => `${px(r.k)},${pyI(r.inertia)}`).join(" L ")} fill="none" stroke="#8A90A6" strokeWidth="2" />
         <path d={"M " + d.map((r) => `${px(r.k)},${pyS(r.sil)}`).join(" L ")} fill="none" stroke="#9B5DE5" strokeWidth="2.5" />
         {d.map((r) => <circle key={r.k} cx={px(r.k)} cy={pyS(r.sil)} r={r.k === 3 ? 5 : 3.2} fill={r.k === 3 ? "#9B5DE5" : "#6E5AA8"} />)}
         {d.map((r) => <text key={r.k} x={px(r.k)} y={Y1 + 18} className="cx-svg-tick" textAnchor="middle">{r.k}</text>)}
         <text x={(X0 + X1) / 2} y={HT - 4} className="cx-svg-axlab" textAnchor="middle">JUMLAH CLUSTER (K)</text>
-        <text x={X1 - 2} y={pyS(sr[1]) - 8} className="cx-svg-tick" textAnchor="end" fill="#B79BEA">silhouette</text>
+        <text x={X1 - 2} y={pyS(sr[1]) - 8} className="cx-svg-tick" textAnchor="end" fill="#7C5CBF">silhouette</text>
         <text x={X1 - 2} y={pyI(inr[3]) + 14} className="cx-svg-tick" textAnchor="end">inertia</text>
       </svg>
       <div className="cx-caption" style={{ borderLeftColor: "#9B5DE5" }}>Inertia terus turun (abu-abu); silhouette (ungu) tertinggi di antara opsi bermakna pada K = 3 — jadi tiap tabel dibagi jadi 3 tipe.</div>
@@ -591,7 +685,7 @@ function RuleScatter() {
         {[0, 0.25, 0.5, 0.75, 1].map((g) => <text key={g} x={X0 - 8} y={py(g) + 3} className="cx-svg-tick" textAnchor="end">{g * 100}%</text>)}
         {[0.03, 0.06, 0.09, 0.12].map((g) => <text key={g} x={px(g)} y={Y1 + 16} className="cx-svg-tick" textAnchor="middle">{g}</text>)}
         {SRULES.map((r, i) => (
-          <circle key={i} cx={px(r.sup)} cy={py(r.conf)} r={rOf(r.lift)} fill={CATCOL[r.cat]} opacity={h === null || h === i ? 0.72 : 0.28} stroke="#141828" strokeWidth="1"
+          <circle key={i} cx={px(r.sup)} cy={py(r.conf)} r={rOf(r.lift)} fill={CATCOL[r.cat]} opacity={h === null || h === i ? 0.72 : 0.28} stroke="#fff" strokeWidth="1"
             onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)} style={{ cursor: "pointer" }} />
         ))}
         <text x={(X0 + X1) / 2} y={HT - 4} className="cx-svg-axlab" textAnchor="middle">SUPPORT (SEBERAPA UMUM) →</text>
@@ -711,7 +805,7 @@ function PcaScatter() {
           );
         })}
         {pts.filter((p) => p.o).map((p, i) => (
-          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#F5A524" stroke="#141828" strokeWidth="1" opacity={h === null || h === "outlier" ? "1" : "0.05"} />
+          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#F5A524" stroke="#fff" strokeWidth="1" opacity={h === null || h === "outlier" ? "1" : "0.05"} />
         ))}
       </svg>
       <div className="cx-scatter-legend">
@@ -786,6 +880,210 @@ function Overview() {
           <Donut segments={outcome} center="8,07%" sub="tingkat gagal bayar" />
         </div>
       </div>
+    </>
+  );
+}
+
+const ABOUT_SECTIONS = [
+  { id: "ringkasan", label: "Ringkasan & Tabel" },
+  { id: "relasi", label: "Skema Relasi" },
+  { id: "konvensi", label: "Konvensi Nilai" },
+  { id: "pipeline", label: "Alur Pipeline" },
+] as const;
+type AboutSection = (typeof ABOUT_SECTIONS)[number]["id"];
+
+function RelationDiagram({ hoverKey, onHover }: { hoverKey: string | null; onHover: (k: string | null) => void }) {
+  return (
+    <svg viewBox="0 0 780 274" className="cx-reldiagram" role="img" aria-label="Diagram skema relasi antar-tabel Home Credit.">
+      {REL_EDGES.map((e) => {
+        const a = REL_NODES[e.from], b = REL_NODES[e.to];
+        const on = hoverKey === null || hoverKey === e.key;
+        const x1 = a.x + a.w / 2, y1 = a.y + a.h, x2 = b.x + b.w / 2, y2 = b.y;
+        const my = (y1 + y2) / 2;
+        return (
+          <path key={e.from + e.to} d={`M ${x1},${y1} C ${x1},${my} ${x2},${my} ${x2},${y2}`} fill="none"
+            stroke={hoverKey === e.key ? KEYCOLOR[e.key] : "#D8DFCE"} strokeWidth={hoverKey === e.key ? 2.6 : 1.6}
+            opacity={on ? 1 : 0.3} style={{ cursor: "pointer", transition: "all .2s" }}
+            onMouseEnter={() => onHover(e.key)} onMouseLeave={() => onHover(null)} />
+        );
+      })}
+      {Object.entries(REL_NODES).map(([id, n]) => {
+        const touching = REL_EDGES.filter((e) => e.from === id || e.to === id).map((e) => e.key);
+        const on = hoverKey === null || touching.includes(hoverKey);
+        const strokeCol = hoverKey && touching.includes(hoverKey) ? KEYCOLOR[hoverKey] : "#D8DFCE";
+        return (
+          <g key={id} opacity={on ? 1 : 0.4} style={{ transition: "opacity .2s" }}>
+            <rect x={n.x} y={n.y} width={n.w} height={n.h} rx="11" fill="var(--card)" stroke={strokeCol} strokeWidth={hoverKey && touching.includes(hoverKey) ? 2.2 : 1.3} />
+            <text x={n.x + n.w / 2} y={n.y + n.h / 2 + 4} textAnchor="middle" className="cx-reldiagram-label">{n.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function About() {
+  const [section, setSection] = useState<AboutSection>("ringkasan");
+  const [sortDir, setSortDir] = useState<"asc" | "desc" | null>(null);
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const [openConv, setOpenConv] = useState<string | null>(CONVENTIONS[0].title);
+  const [activeStep, setActiveStep] = useState<string>("1");
+
+  const toNum = (s: string) => Number(s.replace(/\./g, ""));
+  const rows = sortDir
+    ? [...DATASET_FILES].sort((a, b) => (sortDir === "asc" ? toNum(a.rows) - toNum(b.rows) : toNum(b.rows) - toNum(a.rows)))
+    : DATASET_FILES;
+  const activeFiles = hoverKey ? RELATION_KEYS.find((k) => k.key === hoverKey)?.files ?? [] : null;
+
+  return (
+    <>
+      <KpiRow items={KPIS.about} />
+
+      <div className="cx-card" style={{ padding: "10px" }}>
+        <div className="cx-segmented" role="tablist" aria-label="Bagian Tentang Proyek">
+          {ABOUT_SECTIONS.map((s) => (
+            <button key={s.id} role="tab" aria-selected={section === s.id} className={`cx-segbtn ${section === s.id ? "cx-segbtn-on" : ""}`} onClick={() => setSection(s.id)}>{s.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {section === "ringkasan" && (
+        <div className="cx-rise" key="ringkasan">
+          <div className="cx-card">
+            <div className="cx-card-head"><span className="cx-card-title">Gambaran Umum</span><span className="cx-note">Home Credit Default Risk</span></div>
+            <p className="cx-lead" style={{ maxWidth: "none" }}>
+              <b>Home Credit</b> adalah penyedia kredit untuk nasabah dengan riwayat kredit tipis atau tanpa riwayat sama sekali.
+              Tujuan dataset ini adalah memprediksi <b>kemampuan bayar</b> nasabah. Label target berada di tabel <code>application_train</code>:
+              {" "}<b style={{ color: "#FF6B6B" }}>TARGET = 1</b> berarti nasabah gagal bayar (telat lebih dari X hari pada minimal satu dari Y angsuran pertama),
+              sedangkan <b style={{ color: "#1FB894" }}>TARGET = 0</b> berarti nasabah membayar normal.
+            </p>
+            <p className="cx-subtle" style={{ marginTop: "12px" }}>
+              Dataset terdiri dari <b>8 file</b> yang saling terhubung secara relasional: satu tabel inti ditambah beberapa tabel riwayat pendukung.
+              Arahkan kursor ke salah satu kunci di bawah untuk menyorot file yang memakainya.
+            </p>
+            <div className="cx-keypills">
+              {RELATION_KEYS.map((k) => (
+                <span key={k.key} className="cx-keypill" style={{ borderColor: hoverKey === k.key ? k.color : undefined, color: hoverKey === k.key ? k.color : undefined }}
+                  onMouseEnter={() => setHoverKey(k.key)} onMouseLeave={() => setHoverKey(null)}>
+                  <i style={{ background: k.color }} />{k.key}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="cx-card">
+            <div className="cx-card-head"><span className="cx-card-title">8 Tabel Sumber Data</span><span className="cx-note">klik &ldquo;Baris&rdquo; untuk urutkan</span></div>
+            <div className="cx-tablewrap">
+              <table className="cx-table">
+                <thead>
+                  <tr>
+                    <th>File</th>
+                    <th className="cx-th-sort" onClick={() => setSortDir(sortDir === "asc" ? "desc" : sortDir === "desc" ? null : "asc")}>
+                      Baris {sortDir === "asc" ? "↑" : sortDir === "desc" ? "↓" : "↕"}
+                    </th>
+                    <th>Peran</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((f) => {
+                    const dim = activeFiles !== null && !activeFiles.includes(f.file);
+                    const hit = activeFiles !== null && activeFiles.includes(f.file);
+                    return (
+                      <tr key={f.file} style={{ opacity: dim ? 0.35 : 1, background: hit ? "var(--card2)" : undefined, transition: "all .15s" }}>
+                        <td><code>{f.file}</code></td>
+                        <td>{f.rows}</td>
+                        <td>{f.role}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {section === "relasi" && (
+        <div className="cx-rise" key="relasi">
+          <div className="cx-card">
+            <div className="cx-card-head"><span className="cx-card-title">Diagram Skema Relasi</span><span className="cx-note">arahkan kursor ke node/garis</span></div>
+            <RelationDiagram hoverKey={hoverKey} onHover={setHoverKey} />
+            <div className="cx-caption" style={{ borderLeftColor: hoverKey ? KEYCOLOR[hoverKey] : "#16A34A" }}>
+              {hoverKey ? <><b>{hoverKey}</b> — {RELATION_KEYS.find((k) => k.key === hoverKey)?.desc}</> : "Tiga kunci menghubungkan tujuh tabel: hover node atau garis untuk menelusuri jalur relasinya."}
+            </div>
+          </div>
+
+          <div className="cx-grid cx-grid-2">
+            <div className="cx-card">
+              <div className="cx-card-head"><span className="cx-card-title">Kunci Penghubung Antar-Tabel</span><span className="cx-note">hover untuk sorot diagram</span></div>
+              <div className="cx-dict-list">
+                {RELATION_KEYS.map((k) => (
+                  <div className={`cx-dict-item ${hoverKey === k.key ? "cx-dict-item-on" : ""}`} key={k.key}
+                    style={{ borderColor: hoverKey === k.key ? k.color : undefined }}
+                    onMouseEnter={() => setHoverKey(k.key)} onMouseLeave={() => setHoverKey(null)}>
+                    <b><i className="cx-keydot" style={{ background: k.color }} />{k.key}</b>
+                    <p>{k.desc}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="cx-subtle" style={{ marginTop: "14px" }}>
+                Semua relasi bersifat <b>one-to-many</b> (1 nasabah → banyak baris riwayat), sehingga tabel pendukung
+                tidak bisa langsung digabung ke tabel inti tanpa menggandakan baris — tiap tabel harus diagregasi
+                ke level <code>SK_ID_CURR</code> terlebih dulu.
+              </p>
+            </div>
+            <div className="cx-card">
+              <div className="cx-card-head"><span className="cx-card-title">Kardinalitas Relasi</span><span className="cx-note">bukti dari data</span></div>
+              <div className="cx-dict-list">
+                {RELATION_CARDINALITY.map((r) => (
+                  <div className="cx-dict-item" key={r.rel}><b>{r.rel}</b><p>{r.card}<br /><span style={{ color: "var(--dim)" }}>{r.proof}</span></p></div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {section === "konvensi" && (
+        <div className="cx-card cx-rise" key="konvensi">
+          <div className="cx-card-head"><span className="cx-card-title">Konvensi Nilai Penting</span><span className="cx-note">klik untuk buka/tutup</span></div>
+          <div className="cx-accordion">
+            {CONVENTIONS.map((c) => {
+              const open = openConv === c.title;
+              return (
+                <div key={c.title} className={`cx-accitem ${open ? "cx-accitem-on" : ""}`}>
+                  <button className="cx-acchead" onClick={() => setOpenConv(open ? null : c.title)} aria-expanded={open}>
+                    <span>{c.title}</span>
+                    <span className="cx-accchev" style={{ transform: open ? "rotate(180deg)" : "none" }}><Icon name="chevronDown" /></span>
+                  </button>
+                  {open && <p className="cx-accbody">{c.desc}</p>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {section === "pipeline" && (
+        <div className="cx-card cx-rise" key="pipeline">
+          <div className="cx-card-head"><span className="cx-card-title">Bagaimana Dataset Ini Dipakai</span><span className="cx-note">alur Fase 1 · klik tiap langkah</span></div>
+          <div className="cx-steps">
+            {PIPELINE_STEPS.map((s, i) => {
+              const open = activeStep === s.n;
+              return (
+                <div key={s.n} className="cx-step">
+                  <button className={`cx-stepbtn ${open ? "cx-stepbtn-on" : ""}`} onClick={() => setActiveStep(s.n)}>
+                    <span className="cx-stepnum">{s.n}</span>
+                    <span className="cx-steptitle">{s.title}</span>
+                  </button>
+                  {open && <p className="cx-stepbody">{s.desc}</p>}
+                  {i < PIPELINE_STEPS.length - 1 && <span className="cx-stepline" />}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1017,47 +1315,79 @@ function Dictionary() {
 
 /* ============================ MAIN ============================ */
 
+const TAB_ICON: Record<TabId, string> = {
+  overview: "grid",
+  about: "info",
+  phase1: "filter",
+  phase2: "cluster",
+  phase3: "link",
+  phase4: "search",
+  dictionary: "book",
+};
+
 export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("overview");
+  const [query, setQuery] = useState("");
   const meta = TABS.find((t) => t.id === tab)!;
+  const visibleTabs = TABS.filter((t) => t.label.toLowerCase().includes(query.trim().toLowerCase()));
   return (
     <div className="cx">
       <style>{styles}</style>
-      <div className="cx-shell">
-        {/* top nav */}
-        <nav className="cx-nav">
-          <div className="cx-brand"><span className="cx-logo" /> Group 1 </div>
-          <div className="cx-navlinks" role="tablist" aria-label="Phases">
-            {TABS.map((t) => (
-              <button key={t.id} role="tab" aria-selected={tab === t.id} className={`cx-navlink ${tab === t.id ? "cx-navlink-on" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
+      <div className="cx-app">
+        {/* sidebar */}
+        <aside className="cx-sidebar">
+          <div className="cx-sidebar-top">
+            <div className="cx-brand"><span className="cx-logo" /> Group 1</div>
+            <div className="cx-workspace">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/home-credit-logo.png" alt="Home Credit" className="cx-workspace-logo" />
+              <div className="cx-workspace-txt"><span>Default Risk Analytics</span></div>
+            </div>
+          </div>
+
+          <nav className="cx-navlinks-v" role="tablist" aria-label="Phases">
+            <span className="cx-navgroup-label">Navigasi</span>
+            {visibleTabs.map((t) => (
+              <button key={t.id} role="tab" aria-selected={tab === t.id} className={`cx-navlink-v ${tab === t.id ? "cx-navlink-v-on" : ""}`} onClick={() => setTab(t.id)}>
+                <span className="cx-navlink-icon"><Icon name={TAB_ICON[t.id]} /></span>
+                {t.label}
+              </button>
             ))}
-          </div>
-          <div className="cx-navright">
-          </div>
-        </nav>
+            {visibleTabs.length === 0 && <span className="cx-navempty">Tidak ada yang cocok</span>}
+          </nav>
 
-        {/* title row */}
-        <div className="cx-titlerow">
-          <div>
-            <h1 className="cx-title">{meta.title}</h1>
-            <p className="cx-kicker">{meta.kicker}</p>
+          <div className="cx-sidebar-bottom">
+            <div className="cx-user">
+              <span className="cx-avatar" />
+              <div className="cx-user-txt"><b>Group 1</b><span>Bioline · Lidya · Matthew · Hazel · Timotheus</span></div>
+            </div>
           </div>
-          <div className="cx-controls">
-            <span className="cx-gradbtn"><Icon name="chart" /> 307.511 kredit</span>
-          </div>
+        </aside>
+
+        {/* main */}
+        <div className="cx-main">
+          <header className="cx-topbar">
+            <div>
+              <h1 className="cx-title">{meta.title}</h1>
+              <p className="cx-kicker">{meta.kicker}</p>
+            </div>
+            <div className="cx-controls">
+              <span className="cx-gradbtn"><Icon name="chart" /> 307.511 kredit</span>
+            </div>
+          </header>
+
+          <main key={tab} className="cx-content cx-rise">
+            {tab === "overview" && <Overview />}
+            {tab === "about" && <About />}
+            {tab === "phase1" && <Phase1 />}
+            {tab === "phase2" && <Phase2 />}
+            {tab === "phase3" && <Phase3 />}
+            {tab === "phase4" && <Phase4 />}
+            {tab === "dictionary" && <Dictionary />}
+          </main>
+
+          <footer className="cx-foot">Group 1 | Created by Bioline - Lidya - Matthew - Hazel - Timotheus</footer>
         </div>
-
-        {/* content */}
-        <main key={tab} className="cx-content cx-rise">
-          {tab === "overview" && <Overview />}
-          {tab === "phase1" && <Phase1 />}
-          {tab === "phase2" && <Phase2 />}
-          {tab === "phase3" && <Phase3 />}
-          {tab === "phase4" && <Phase4 />}
-          {tab === "dictionary" && <Dictionary />}
-        </main>
-
-        <footer className="cx-foot">Group 1 | Created by Bioline - Lidya - Matthew - Hazel - Timotheus</footer>
       </div>
     </div>
   );
@@ -1067,40 +1397,55 @@ export default function Dashboard() {
 
 const styles = `
 .cx{
-  --page:#E9EAF6; --shell:#0E1120; --card:#171B2B; --card2:#1E2333; --line:#282E42;
-  --ink:#F3F4FA; --muted:#8A90A6; --dim:#5E6379;
-  --blue:#5B8DEF; --purple:#9B5DE5; --grad:#5B8DEF;
+  --page:#F2F4EC; --sidebar-a:#0C1712; --sidebar-b:#132A20; --card:#FFFFFF; --card2:#EEF1E7; --line:#E4E8DC;
+  --ink:#141A14; --muted:#6E7768; --dim:#9AA391;
+  --blue:#16A34A; --purple:#9B5DE5; --grad:#16A34A;
   --up:#1FB894; --down:#FF6B6B; --warn:#F5A524;
   --body:var(--font-geist-sans),system-ui,sans-serif;
-  min-height:100vh; background:var(--shell); font-family:var(--body); color:var(--ink);
+  min-height:100vh; background:var(--page); font-family:var(--body); color:var(--ink);
   padding:0; -webkit-font-smoothing:antialiased;
 }
 .cx *{box-sizing:border-box;}
-.cx-shell{max-width:1240px; margin:0 auto; background:var(--shell); border-radius:0; padding:4px 28px 48px;}
+.cx-app{display:flex; align-items:stretch; min-height:100vh;}
 
-/* nav */
-.cx-nav{display:flex; align-items:center; gap:22px; padding:16px 4px; border-bottom:1px solid var(--line);}
-.cx-brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:16px; letter-spacing:-.01em;}
+/* sidebar */
+.cx-sidebar{width:264px; flex:none; display:flex; flex-direction:column; gap:24px; padding:22px 16px 18px; color:#EAF2EC; background:linear-gradient(175deg, var(--sidebar-a), var(--sidebar-b)); position:sticky; top:0; height:100vh; overflow-y:auto;}
+.cx-sidebar-top{display:flex; flex-direction:column; gap:14px;}
+.cx-brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:16px; letter-spacing:-.01em; color:#fff; padding:0 2px;}
 .cx-logo{width:20px; height:20px; border-radius:7px; background:var(--blue);}
-.cx-navlinks{display:flex; gap:4px; flex:1;}
-.cx-navlink{appearance:none; background:none; border:none; cursor:pointer; color:var(--muted); font-family:var(--body); font-size:13.5px; font-weight:500; padding:8px 13px; border-radius:9px; transition:all .15s;}
-.cx-navlink:hover{color:var(--ink); background:rgba(255,255,255,.04);}
-.cx-navlink-on{color:var(--ink); background:rgba(255,255,255,.06);}
-.cx-navright{display:flex; align-items:center; gap:12px;}
-.cx-iconbtn{display:grid; place-items:center; width:34px; height:34px; border-radius:50%; background:var(--card); border:1px solid var(--line); color:var(--muted);}
-.cx-user{display:flex; align-items:center; gap:9px;}
-.cx-avatar{width:32px; height:32px; border-radius:50%; background:var(--grad);}
-.cx-user-txt{display:flex; flex-direction:column; line-height:1.15;}
-.cx-user-txt b{font-size:12.5px; font-weight:600;}
-.cx-user-txt span{font-size:11px; color:var(--muted);}
+.cx-workspace{display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.09); border-radius:13px; padding:9px 11px; cursor:pointer; color:#EAF2EC;}
+.cx-workspace-logo{height:22px; width:auto; flex:none; display:block;}
+.cx-workspace-txt{display:flex; flex-direction:column; justify-content:center; line-height:1.2; flex:1; min-width:0;}
+.cx-workspace-txt span{font-size:10.5px; color:rgba(234,242,236,.55);}
+.cx-search{display:flex; align-items:center; gap:9px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.09); border-radius:11px; padding:9px 11px; color:rgba(234,242,236,.5);}
+.cx-search input{appearance:none; background:none; border:none; outline:none; color:#EAF2EC; font-family:var(--body); font-size:12.5px; width:100%;}
+.cx-search input::placeholder{color:rgba(234,242,236,.4);}
 
-/* title row */
-.cx-titlerow{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; padding:22px 4px 20px;}
-.cx-title{margin:0; font-size:26px; font-weight:700; letter-spacing:-.02em;}
+.cx-navlinks-v{display:flex; flex-direction:column; gap:2px; flex:1;}
+.cx-navgroup-label{font-size:10.5px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:rgba(234,242,236,.35); padding:6px 12px 8px;}
+.cx-navlink-v{display:flex; align-items:center; gap:11px; appearance:none; background:none; border:none; cursor:pointer; color:rgba(234,242,236,.65); font-family:var(--body); font-size:13.5px; font-weight:500; padding:10px 12px; border-radius:11px; transition:all .15s; text-align:left; width:100%;}
+.cx-navlink-icon{display:grid; place-items:center; width:20px; height:20px; flex:none;}
+.cx-navlink-v:hover{color:#fff; background:rgba(255,255,255,.07);}
+.cx-navlink-v-on{color:var(--sidebar-a); background:#EAF2EC; font-weight:600;}
+.cx-navempty{padding:8px 12px; font-size:12px; color:rgba(234,242,236,.4);}
+
+.cx-sidebar-bottom{border-top:1px solid rgba(255,255,255,.09); padding-top:16px;}
+.cx-user{display:flex; align-items:center; gap:10px;}
+.cx-avatar{width:34px; height:34px; border-radius:50%; background:var(--grad); flex:none;}
+.cx-user-txt{display:flex; flex-direction:column; line-height:1.25; min-width:0;}
+.cx-user-txt b{font-size:12.5px; font-weight:600; color:#fff;}
+.cx-user-txt span{font-size:10px; color:rgba(234,242,236,.5); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block;}
+
+/* main / topbar */
+.cx-main{flex:1; min-width:0; padding:26px 32px 48px;}
+.cx-topbar{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; padding:2px 2px 20px;}
+.cx-title{margin:0; font-size:25px; font-weight:700; letter-spacing:-.02em; color:var(--ink);}
 .cx-kicker{margin:5px 0 0; font-size:13.5px; color:var(--muted);}
 .cx-controls{display:flex; align-items:center; gap:10px;}
 .cx-pill{font-size:12.5px; color:var(--muted); background:var(--card); border:1px solid var(--line); padding:8px 14px; border-radius:10px;}
-.cx-gradbtn{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600; color:#fff; background:var(--blue); padding:9px 15px; border-radius:10px;}
+.cx-iconbtn{display:grid; place-items:center; width:38px; height:38px; border-radius:50%; background:var(--card); border:1px solid var(--line); color:var(--muted); cursor:pointer;}
+.cx-iconbtn:hover{color:var(--ink); border-color:var(--dim);}
+.cx-gradbtn{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600; color:#fff; background:var(--ink); padding:10px 16px; border-radius:11px;}
 
 .cx-content{display:flex; flex-direction:column; gap:16px;}
 .cx-rise{animation:cx-rise .45s cubic-bezier(.22,.61,.36,1) both;}
@@ -1109,20 +1454,35 @@ const styles = `
 
 /* kpis */
 .cx-kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px;}
-.cx-kpi{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:17px 18px;}
+.cx-kpi{background:var(--card); border:1px solid var(--line); border-radius:18px; padding:18px 19px;}
+.cx-kpi-feature{background:linear-gradient(160deg, var(--sidebar-a), var(--sidebar-b)); border-color:transparent;}
+.cx-kpi-feature .cx-kpi-label{color:rgba(234,242,236,.6);}
+.cx-kpi-feature .cx-kpi-icon{background:rgba(255,255,255,.12); color:#EAF2EC;}
+.cx-kpi-feature .cx-kpi-val{color:#fff;}
+.cx-kpi-feature .cx-chip-flat{color:rgba(234,242,236,.75); background:rgba(255,255,255,.12);}
 .cx-kpi-top{display:flex; align-items:center; justify-content:space-between; gap:8px;}
 .cx-kpi-label{font-size:12.5px; color:var(--muted);}
-.cx-kpi-icon{display:grid; place-items:center; width:28px; height:28px; border-radius:8px; background:var(--card2); color:var(--muted);}
-.cx-kpi-val{font-size:29px; font-weight:700; letter-spacing:-.02em; margin:10px 0 10px;}
-.cx-chip{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:4px 9px; border-radius:999px;}
+.cx-kpi-icon{display:grid; place-items:center; width:28px; height:28px; border-radius:9px; background:var(--card2); color:var(--muted);}
+.cx-kpi-body{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:12px;}
+.cx-kpi-val{font-size:26px; font-weight:700; letter-spacing:-.02em;}
+.cx-chip{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:4px 9px; border-radius:999px; margin-top:10px; max-width:100%; white-space:normal; line-height:1.35;}
 .cx-chip b{font-size:11px;}
 .cx-chip-up{color:var(--up); background:rgba(31,184,148,.12);}
 .cx-chip-down{color:var(--down); background:rgba(255,107,107,.12);}
 .cx-chip-warn{color:var(--warn); background:rgba(245,165,36,.12);}
 .cx-chip-flat{color:var(--muted); background:var(--card2);}
 
+/* sparkline motif */
+.cx-spark{display:flex; align-items:flex-end; gap:2.5px; height:34px; width:58px; flex:none;}
+.cx-spark span{flex:1; min-height:3px; border-radius:2px; background:currentColor; opacity:.9;}
+.cx-spark-up{color:var(--up);}
+.cx-spark-down{color:var(--down);}
+.cx-spark-warn{color:var(--warn);}
+.cx-spark-flat{color:var(--dim);}
+.cx-kpi-feature .cx-spark{color:rgba(234,242,236,.55) !important;}
+
 /* cards / grid */
-.cx-card{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px 22px;}
+.cx-card{background:var(--card); border:1px solid var(--line); border-radius:18px; padding:20px 22px;}
 .cx-card-head{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:16px;}
 .cx-card-title{font-size:15px; font-weight:600;}
 .cx-note{font-size:11px; font-weight:600; letter-spacing:.03em; text-transform:uppercase; color:var(--dim);}
@@ -1134,10 +1494,10 @@ const styles = `
 .cx-grid-2-3{grid-template-columns:.9fr 1.1fr;}
 
 /* takeaway */
-.cx-takeaway{background:var(--card2); border:1px solid #2C3350; border-radius:16px; padding:20px 22px;}
+.cx-takeaway{background:var(--card2); border:1px solid var(--line); border-radius:16px; padding:20px 22px;}
 .cx-takeaway p{margin:10px 0 0; font-size:clamp(16px,2vw,20px); line-height:1.5; max-width:80ch;}
-.cx-takeaway em{font-style:normal; color:#B9C6FF; font-weight:600;}
-.cx-takeaway strong{color:#fff; font-weight:700;}
+.cx-takeaway em{font-style:normal; color:var(--blue); font-weight:600;}
+.cx-takeaway strong{color:var(--ink); font-weight:700;}
 
 /* donut */
 .cx-donutwrap{display:flex; gap:22px; align-items:center; flex-wrap:wrap;}
@@ -1264,6 +1624,52 @@ const styles = `
 .cx-ph-txt{font-size:12.5px; color:var(--dim); line-height:1.65; margin:9px 0 0;}
 .cx code{background:var(--card2); border:1px solid var(--line); border-radius:5px; padding:1px 5px; font-size:11.5px; color:var(--ink); font-family:var(--mono,ui-monospace,monospace);}
 
+/* about — dataset table */
+.cx-tablewrap{overflow-x:auto;}
+.cx-table{width:100%; border-collapse:collapse; font-size:13px;}
+.cx-table th{text-align:left; font-size:11px; font-weight:600; letter-spacing:.03em; text-transform:uppercase; color:var(--dim); padding:0 12px 10px; border-bottom:1px solid var(--line);}
+.cx-table td{padding:11px 12px; border-bottom:1px solid var(--line); color:var(--muted); vertical-align:top;}
+.cx-table tr:last-child td{border-bottom:none;}
+.cx-table td:first-child{color:var(--ink); white-space:nowrap;}
+.cx-table td:nth-child(2){font-weight:700; color:var(--ink); white-space:nowrap;}
+.cx-th-sort{cursor:pointer; user-select:none;}
+.cx-th-sort:hover{color:var(--ink);}
+
+/* about — segmented control */
+.cx-segmented{display:flex; gap:4px; flex-wrap:wrap;}
+.cx-segbtn{appearance:none; cursor:pointer; font-family:var(--body); font-size:12.5px; font-weight:600; color:var(--muted); background:none; border:none; border-radius:11px; padding:10px 14px; transition:all .15s;}
+.cx-segbtn:hover{color:var(--ink); background:var(--card2);}
+.cx-segbtn-on{color:#fff; background:var(--ink);}
+
+/* about — key pills */
+.cx-keypills{display:flex; gap:8px; flex-wrap:wrap; margin-top:14px;}
+.cx-keypill{display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:600; color:var(--muted); background:var(--card2); border:1px solid var(--line); border-radius:999px; padding:6px 12px; cursor:default; transition:all .15s;}
+.cx-keypill i{width:8px; height:8px; border-radius:50%; flex:none;}
+.cx-keydot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px;}
+
+/* about — relation diagram */
+.cx-reldiagram{width:100%; height:auto; display:block; overflow:visible;}
+.cx-reldiagram-label{font-family:var(--body); font-size:11.5px; font-weight:600; fill:var(--ink);}
+.cx-dict-item-on{background:var(--card);}
+
+/* about — accordion (conventions) */
+.cx-accordion{display:flex; flex-direction:column; gap:8px;}
+.cx-accitem{background:var(--card2); border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:border-color .2s;}
+.cx-accitem-on{border-color:var(--blue);}
+.cx-acchead{appearance:none; width:100%; display:flex; align-items:center; justify-content:space-between; gap:10px; background:none; border:none; cursor:pointer; padding:14px 16px; font-family:var(--body); font-size:13.5px; font-weight:600; color:var(--ink); text-align:left;}
+.cx-accchev{display:grid; place-items:center; color:var(--muted); transition:transform .2s;}
+.cx-accbody{margin:0; padding:0 16px 16px; font-size:13px; color:var(--muted); line-height:1.55;}
+
+/* about — pipeline steps */
+.cx-steps{display:flex; flex-direction:column;}
+.cx-step{position:relative; padding-left:2px;}
+.cx-stepline{position:absolute; left:15px; top:36px; bottom:-8px; width:1px; background:var(--line);}
+.cx-stepbtn{appearance:none; width:100%; display:flex; align-items:center; gap:12px; background:none; border:none; cursor:pointer; padding:9px 4px; font-family:var(--body); text-align:left;}
+.cx-stepnum{display:grid; place-items:center; width:30px; height:30px; border-radius:50%; background:var(--card2); border:1px solid var(--line); color:var(--muted); font-size:13px; font-weight:700; flex:none; z-index:1;}
+.cx-stepbtn-on .cx-stepnum{background:var(--blue); border-color:transparent; color:#fff;}
+.cx-steptitle{font-size:14px; font-weight:600; color:var(--ink);}
+.cx-stepbody{margin:2px 0 14px 46px; font-size:13px; color:var(--muted); line-height:1.6; max-width:70ch;}
+
 /* dictionary */
 .cx-dict-list{display:flex; flex-direction:column; gap:16px;}
 .cx-dict-item{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:16px; transition:border-color .2s;}
@@ -1276,6 +1682,7 @@ const styles = `
   .cx-grid-2,.cx-grid-3-2,.cx-grid-2-3{grid-template-columns:1fr;}
   .cx-verdict{grid-template-columns:1fr;}
   .cx-personas-2{grid-template-columns:1fr;}
-  .cx-navlinks{display:none;}
+  .cx-sidebar{display:none;}
+  .cx-main{padding:20px 18px 40px;}
 }
 `;
