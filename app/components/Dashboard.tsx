@@ -61,9 +61,9 @@ const RISK_BARS = [
 ];
 
 const METHODS = [
-  { name: "Nilai ekstrem (IQR)", pct: 31.0, n: 95455, note: "Jaring terluas — satu angka janggal saja." },
-  { name: "Jauh dari rata-rata (Z-score)", pct: 9.8, n: 30035, note: "Lebih ketat — hanya nilai jauh dari lazim." },
-  { name: "Kombinasi janggal (Isolation Forest)", pct: 1.0, n: 3076, note: "Paling ketat — campuran nilai yang mustahil." },
+  { name: "Lensa 1: Interquartile Range (IQR)", pct: 31.0, n: 95455, note: "Jaring terluas (Statistik Dasar). Mencari nilai yang jauh melebihi batas atas/bawah distribusi normal. Menemukan keanehan tunggal, misal: nominal pinjaman terlalu besar." },
+  { name: "Lensa 2: Z-Score", pct: 9.8, n: 30035, note: "Lensa menengah (Standar Deviasi). Mengukur seberapa menyimpang sebuah fitur dari rata-ratanya. Lebih ketat, hanya menangkap nilai yang sangat di luar kewajaran." },
+  { name: "Lensa 3: Isolation Forest (AI)", pct: 1.0, n: 3076, note: "Lensa tertajam (Machine Learning). Mencari anomali pola multivariat (gabungan beberapa kolom). Misal: penghasilan wajar, tapi kombinasinya dengan masa kerja dan cicilan menjadi sangat mustahil." },
 ];
 const TABS = [
   { id: "overview", label: "Overview", title: "Portofolio Overview", kicker: "Apa yang memprediksi kredit macet, dalam satu layar" },
@@ -71,6 +71,7 @@ const TABS = [
   { id: "phase2", label: "Clustering", title: "Fase 2 · Clustering", kicker: "Yang lunas vs yang gagal bayar" },
   { id: "phase3", label: "Association Rules", title: "Fase 3 · Association Rules", kicker: "Kombinasi yang menandakan risiko" },
   { id: "phase4", label: "Outlier", title: "Fase 4 · Outlier", kicker: "Deteksi kredit yang tak lazim" },
+  { id: "dictionary", label: "Kamus & Aturan", title: "Kamus Fitur & Aturan", kicker: "Glosarium fitur dan penjelasan lengkap aturan asosiasi" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -106,6 +107,12 @@ const KPIS: Record<TabId, Kpi[]> = {
     { label: "Keyakinan tinggi", value: "30,122", icon: "target", chip: { tone: "warn", text: "≥2 lensa sepakat" } },
     { label: "Sinyal risiko", value: "3,983", icon: "alert", chip: { tone: "down", text: "review manual" } },
     { label: "Data error", value: "0", icon: "check", chip: { tone: "up", text: "semua cek lolos" } },
+  ],
+  dictionary: [
+    { label: "Total Fitur", value: "11", icon: "layers", chip: { tone: "flat", text: "fitur utama" } },
+    { label: "Aturan Disimpan", value: "18", icon: "chart", chip: { tone: "flat", text: "dari 81.710" } },
+    { label: "Aturan Risiko", value: "8", icon: "alert", chip: { tone: "down", text: "prediksi gagal" } },
+    { label: "Aturan Aman", value: "4", icon: "check", chip: { tone: "up", text: "prediksi lunas" } },
   ],
 };
 
@@ -513,7 +520,7 @@ function Radar() {
   const cx = 180, cy = 158, RAD = 116;
   const ang = (i: number) => (-90 + i * (360 / FEATS.length)) * (Math.PI / 180);
   const norm = (k: FKey, v: number) => { const [mn, mx] = fRange(k); return mx === mn ? 0.5 : (v - mn) / (mx - mn); };
-  const poly = (idx: number) => FEATS.map((f, i) => { const r = (0.12 + 0.88 * norm(f.key, PROFILES[idx][f.key])) * RAD; return `${cx + r * Math.cos(ang(i))},${cy + r * Math.sin(ang(i))}`; }).join(" ");
+  const poly = (idx: number) => "M " + FEATS.map((f, i) => { const r = (0.12 + 0.88 * norm(f.key, PROFILES[idx][f.key])) * RAD; return `${cx + r * Math.cos(ang(i))},${cy + r * Math.sin(ang(i))}`; }).join(" L ") + " Z";
   return (
     <div>
       <div className="cx-toggle">
@@ -523,11 +530,11 @@ function Radar() {
       </div>
       <svg viewBox="0 0 360 300" className="cx-radar" role="img" aria-label="Radar membandingkan sepasang kembar antar-feature.">
         {[0.33, 0.66, 1].map((g) => (
-          <polygon key={g} points={FEATS.map((_, i) => `${cx + g * RAD * Math.cos(ang(i))},${cy + g * RAD * Math.sin(ang(i))}`).join(" ")} fill="none" stroke="#282E42" strokeWidth="1" />
+          <path key={g} d={"M " + FEATS.map((_, i) => `${cx + g * RAD * Math.cos(ang(i))},${cy + g * RAD * Math.sin(ang(i))}`).join(" L ") + " Z"} fill="none" stroke="#282E42" strokeWidth="1" />
         ))}
         {FEATS.map((f, i) => <line key={f.key} x1={cx} y1={cy} x2={cx + RAD * Math.cos(ang(i))} y2={cy + RAD * Math.sin(ang(i))} stroke="#282E42" strokeWidth="1" />)}
-        <polygon points={poly(def)} fill="#FF6B6B" fillOpacity="0.18" stroke="#FF6B6B" strokeWidth="2" />
-        <polygon points={poly(paid)} fill="#1FB894" fillOpacity="0.16" stroke="#1FB894" strokeWidth="2" />
+        <path d={poly(def)} fill="#FF6B6B" fillOpacity="0.18" stroke="#FF6B6B" strokeWidth="2" />
+        <path d={poly(paid)} fill="#1FB894" fillOpacity="0.16" stroke="#1FB894" strokeWidth="2" />
         {FEATS.map((f, i) => {
           const lx = cx + (RAD + 16) * Math.cos(ang(i)), ly = cy + (RAD + 16) * Math.sin(ang(i));
           return <text key={f.key} x={lx} y={ly + 3} className="cx-radar-lab" textAnchor={Math.abs(Math.cos(ang(i))) < 0.3 ? "middle" : Math.cos(ang(i)) > 0 ? "start" : "end"}>{f.short}</text>;
@@ -557,8 +564,8 @@ function ElbowChart() {
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-elbow" role="img" aria-label="Elbow dan silhouette menurut jumlah cluster.">
         <line x1={px(3)} y1={Y0} x2={px(3)} y2={Y1} stroke="#5B8DEF" strokeWidth="1.4" strokeDasharray="4 4" opacity="0.7" />
         <text x={px(3)} y={Y0 - 8} className="cx-svg-tick" textAnchor="middle" fill="#8FB0FF">K terpilih = 3</text>
-        <polyline points={d.map((r) => `${px(r.k)},${pyI(r.inertia)}`).join(" ")} fill="none" stroke="#8A90A6" strokeWidth="2" />
-        <polyline points={d.map((r) => `${px(r.k)},${pyS(r.sil)}`).join(" ")} fill="none" stroke="#9B5DE5" strokeWidth="2.5" />
+        <path d={"M " + d.map((r) => `${px(r.k)},${pyI(r.inertia)}`).join(" L ")} fill="none" stroke="#8A90A6" strokeWidth="2" />
+        <path d={"M " + d.map((r) => `${px(r.k)},${pyS(r.sil)}`).join(" L ")} fill="none" stroke="#9B5DE5" strokeWidth="2.5" />
         {d.map((r) => <circle key={r.k} cx={px(r.k)} cy={pyS(r.sil)} r={r.k === 3 ? 5 : 3.2} fill={r.k === 3 ? "#9B5DE5" : "#6E5AA8"} />)}
         {d.map((r) => <text key={r.k} x={px(r.k)} y={Y1 + 18} className="cx-svg-tick" textAnchor="middle">{r.k}</text>)}
         <text x={(X0 + X1) / 2} y={HT - 4} className="cx-svg-axlab" textAnchor="middle">JUMLAH CLUSTER (K)</text>
@@ -670,7 +677,8 @@ function DataPlaceholder({ err }: { err: boolean }) {
 
 function PcaScatter() {
   const { d, err } = useSampleData();
-  const [mode, setMode] = useState<"outcome" | "cluster">("outcome");
+  const [mode, setMode] = useState<"outcome" | "cluster_all" | "cluster_paid" | "cluster_def">("outcome");
+  const [h, setH] = useState<string | null>(null);
   if (!d) return <DataPlaceholder err={err} />;
   const pts = d.scatter;
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
@@ -682,23 +690,44 @@ function PcaScatter() {
     <div>
       <div className="cx-toggle">
         <button className={`cx-toggle-btn ${mode === "outcome" ? "cx-toggle-on" : ""}`} onClick={() => setMode("outcome")}>Per hasil</button>
-        <button className={`cx-toggle-btn ${mode === "cluster" ? "cx-toggle-on" : ""}`} onClick={() => setMode("cluster")}>Per segmen</button>
+        <button className={`cx-toggle-btn ${mode === "cluster_all" ? "cx-toggle-on" : ""}`} onClick={() => setMode("cluster_all")}>Semua Segmen</button>
+        <button className={`cx-toggle-btn ${mode === "cluster_paid" ? "cx-toggle-on" : ""}`} onClick={() => setMode("cluster_paid")}>Segmen Lunas</button>
+        <button className={`cx-toggle-btn ${mode === "cluster_def" ? "cx-toggle-on" : ""}`} onClick={() => setMode("cluster_def")}>Segmen Gagal</button>
       </div>
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-scatter" role="img" aria-label="Scatter PCA dari sampel nasabah yang di-stratifikasi.">
-        {pts.filter((p) => !p.o).map((p, i) => (
-          <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t ? "#FF6B6B" : "#1FB894") : (CLUSTERCOL[p.c] || "#8A90A6")} opacity="0.5" />
-        ))}
+        {pts.filter((p) => !p.o).map((p, i) => {
+          let visible = true;
+          if (mode === "cluster_paid" && p.t === 1) visible = false;
+          if (mode === "cluster_def" && p.t === 0) visible = false;
+          
+          let isH = false;
+          if (mode === "outcome") {
+            isH = h === null || (h === "def" ? p.t === 1 : h === "paid" ? p.t === 0 : false);
+          } else {
+            isH = h === null || p.c === h;
+          }
+          return (
+            <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t === 1 ? "#FF6B6B" : "#1FB894") : (CLUSTERCOL[p.c] || "#8A90A6")} opacity={!visible ? "0" : isH ? "0.6" : "0.05"} />
+          );
+        })}
         {pts.filter((p) => p.o).map((p, i) => (
-          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#F5A524" stroke="#141828" strokeWidth="1" />
+          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#F5A524" stroke="#141828" strokeWidth="1" opacity={h === null || h === "outlier" ? "1" : "0.05"} />
         ))}
       </svg>
       <div className="cx-scatter-legend">
         {mode === "outcome" ? (
-          <><span><i style={{ background: "#1FB894" }} /> Lunas</span><span><i style={{ background: "#FF6B6B" }} /> Gagal bayar</span></>
+          <>
+            <span onMouseEnter={() => setH("paid")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "paid" ? 1 : 0.4 }}><i style={{ background: "#1FB894" }} /> Lunas</span>
+            <span onMouseEnter={() => setH("def")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "def" ? 1 : 0.4 }}><i style={{ background: "#FF6B6B" }} /> Gagal bayar</span>
+          </>
         ) : (
-          Object.entries(CLUSTERCOL).map(([id, c]) => <span key={id}><i style={{ background: c }} /> {id}</span>)
+          Object.entries(CLUSTERCOL)
+            .filter(([id]) => mode === "cluster_all" || (mode === "cluster_paid" && id.startsWith("P")) || (mode === "cluster_def" && id.startsWith("D")))
+            .map(([id, c]) => (
+            <span key={id} onMouseEnter={() => setH(id)} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === id ? 1 : 0.4 }}><i style={{ background: c }} /> {id}</span>
+          ))
         )}
-        <span><i style={{ background: "#F5A524" }} /> Outlier DBSCAN</span>
+        <span onMouseEnter={() => setH("outlier")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "outlier" ? 1 : 0.4 }}><i style={{ background: "#F5A524" }} /> Outlier DBSCAN</span>
         <span className="cx-note">{pts.length} titik sampel</span>
       </div>
     </div>
@@ -718,7 +747,7 @@ function HistExplorer() {
   const maxR = Math.max(...h.repaid, 1), maxD = Math.max(...h.default, 1);
   const area = (arr: number[], max: number) => {
     const ry = (v: number) => HT - pad - (v / max) * (HT - 2 * pad);
-    return `${pad},${HT - pad} ` + arr.map((v, i) => `${bx(i).toFixed(1)},${ry(v).toFixed(1)}`).join(" ") + ` ${W - pad},${HT - pad}`;
+    return `M ${pad},${HT - pad} ` + arr.map((v, i) => `L ${bx(i).toFixed(1)},${ry(v).toFixed(1)}`).join(" ") + ` L ${W - pad},${HT - pad} Z`;
   };
   return (
     <div>
@@ -728,8 +757,8 @@ function HistExplorer() {
         ))}
       </div>
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-scatter" role="img" aria-label="Distribusi feature terpilih, lunas vs gagal bayar.">
-        <polygon points={area(h.repaid, maxR)} fill="#1FB894" fillOpacity="0.22" stroke="#1FB894" strokeWidth="2" />
-        <polygon points={area(h.default, maxD)} fill="#FF6B6B" fillOpacity="0.2" stroke="#FF6B6B" strokeWidth="2" />
+        <path d={area(h.repaid, maxR)} fill="#1FB894" fillOpacity="0.22" stroke="#1FB894" strokeWidth="2" />
+        <path d={area(h.default, maxD)} fill="#FF6B6B" fillOpacity="0.2" stroke="#FF6B6B" strokeWidth="2" />
       </svg>
       <div className="cx-scatter-legend"><span><i style={{ background: "#1FB894" }} /> Lunas</span><span><i style={{ background: "#FF6B6B" }} /> Gagal bayar</span><span className="cx-note">tiap kurva diskala ke puncaknya sendiri</span></div>
       <p className="cx-subtle">Bentuk asli dari seluruh 307.511 kredit. Geser antar-feature pada skor kredit, kurva gagal bayar jelas bergeser ke kiri.</p>
@@ -793,6 +822,29 @@ function Phase1() {
   );
 }
 
+function PersonaDonuts() {
+  const [tgt, setTgt] = useState<"all" | "paid" | "def">("all");
+  const all: Seg[] = [...PAID_PERSONAS, ...DEF_PERSONAS].map((p) => ({ label: `${p.id} · ${p.name}`, value: p.count, color: p.color }));
+  const paid: Seg[] = PAID_PERSONAS.map((p) => ({ label: `${p.id} · ${p.name}`, value: p.count, color: p.color }));
+  const def: Seg[] = DEF_PERSONAS.map((p) => ({ label: `${p.id} · ${p.name}`, value: p.count, color: p.color }));
+  
+  const segments = tgt === "all" ? all : tgt === "paid" ? paid : def;
+  const center = tgt === "all" ? "307.511" : tgt === "paid" ? "282.686" : "24.825";
+  const sub = tgt === "all" ? "nasabah" : tgt === "paid" ? "lunas" : "gagal bayar";
+
+  return (
+    <div className="cx-card">
+      <div className="cx-card-head" style={{ marginBottom: "10px" }}><span className="cx-card-title">Enam tipe nasabah</span><span className="cx-note">Tampilan per target</span></div>
+      <div className="cx-toggle" style={{ marginBottom: "20px" }}>
+        <button className={`cx-toggle-btn ${tgt === "all" ? "cx-toggle-on" : ""}`} onClick={() => setTgt("all")}>Semua</button>
+        <button className={`cx-toggle-btn ${tgt === "paid" ? "cx-toggle-on" : ""}`} onClick={() => setTgt("paid")}>Lunas (3)</button>
+        <button className={`cx-toggle-btn ${tgt === "def" ? "cx-toggle-on" : ""}`} onClick={() => setTgt("def")}>Gagal (3)</button>
+      </div>
+      <Donut segments={segments} center={center} sub={sub} />
+    </div>
+  );
+}
+
 function Phase2() {
   const personas: Seg[] = [...PAID_PERSONAS, ...DEF_PERSONAS].map((p) => ({ label: `${p.id} · ${p.name}`, value: p.count, color: p.color }));
   return (
@@ -833,10 +885,7 @@ function Phase2() {
         </div>
       </div>
       <div className="cx-grid cx-grid-2-3">
-        <div className="cx-card">
-          <div className="cx-card-head"><span className="cx-card-title">Enam tipe nasabah</span><span className="cx-note">307.511 nasabah</span></div>
-          <Donut segments={personas} center="307.511" sub="nasabah" />
-        </div>
+        <PersonaDonuts />
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title" style={{ color: "#1FB894" }}>Tipe lunas</span><span className="cx-card-title" style={{ color: "#FF6B6B" }}>Tipe gagal bayar</span></div>
           <div className="cx-personas-2">
@@ -876,9 +925,10 @@ function Phase4() {
     <>
       <KpiRow items={KPIS.phase4} />
       <div className="cx-card">
-        <div className="cx-card-head"><span className="cx-card-title">Tiga lensa, menyaring bertahap</span><span className="cx-note">arahkan kursor ke tiap lensa</span></div>
+        <div className="cx-card-head"><span className="cx-card-title">Tiga Lensa Anomaly Detection</span><span className="cx-note">arahkan kursor ke tiap lensa</span></div>
+        <p className="cx-lead" style={{ marginBottom: "22px", fontSize: "13.5px" }}>Istilah <b>"Lensa"</b> di sini mengacu pada <b>tiga algoritma pendeteksi anomali (outlier)</b> yang berbeda. Karena tidak ada satu algoritma yang selalu benar, kami menggunakan pendekatan berlapis (ensemble) mulai dari statistik matematis dasar (IQR & Z-Score) hingga algoritma AI modern (Isolation Forest) untuk menyaring data.</p>
         <MethodFunnel />
-        <p className="cx-subtle">Di mana minimal dua lensa sepakat, <b>30.122</b> kredit, kami anggap flag berkeyakinan tinggi.</p>
+        <p className="cx-subtle" style={{ marginTop: "20px" }}>Di mana minimal dua algoritma di atas sepakat terhadap baris yang sama, kami mendapatkan <b>30.122</b> kredit yang kami jadikan target <i>flagging</i> dengan keyakinan tinggi.</p>
       </div>
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
@@ -894,10 +944,71 @@ function Phase4() {
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Outlier vs nasabah tipikal</span><span className="cx-note">outlier DBSCAN</span></div>
           <OutlierProfile />
+          <p className="cx-subtle" style={{ marginTop: "14px", lineHeight: 1.55, fontSize: "12.5px" }}>
+            <b>Apa artinya?</b> Nasabah outlier (anomali) menunjukkan rasio utang yang sangat ekstrem. 
+            Nilai <b>Kredit ÷ Penghasilan</b> mereka mencapai 5.7× gaji (dibandingkan nasabah tipikal yang hanya 3.9×). 
+            Selain itu, <b>Anuitas ÷ Penghasilan</b> mereka adalah 0.27, yang berarti 27% dari total pendapatan mereka habis murni untuk membayar cicilan bulanan (berbanding 18% pada nasabah wajar). 
+            Rasio hutang yang terlalu mencekik inilah yang membuat algoritma menandai mereka sebagai sangat tidak wajar (risiko tinggi).
+          </p>
         </div>
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Vonisnya</span><span className="cx-note">tiap kredit diklasifikasi</span></div>
           <Donut segments={VERDICT_SEG} center="30.122" sub="diflag untuk review" />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Dictionary() {
+  return (
+    <>
+      <KpiRow items={KPIS.dictionary} />
+      <div className="cx-grid cx-grid-2">
+        {/* KOLOM KIRI: KAMUS FITUR */}
+        <div className="cx-card" style={{ alignSelf: "start" }}>
+          <div className="cx-card-head"><span className="cx-card-title">Kamus Fitur Utama</span><span className="cx-note">Data Dictionary</span></div>
+          <div className="cx-dict-list">
+            <div className="cx-dict-item"><b>EXT_SOURCE_2 & EXT_SOURCE_3</b><p>Skor kredit historis dari pihak ketiga (Biro Kredit Eksternal). Nilai dinormalisasi dari 0 (sangat buruk) ke 1 (sangat baik). Ini adalah prediktor terkuat; nasabah dengan skor ini tinggi jarang sekali gagal bayar.</p></div>
+            <div className="cx-dict-item"><b>AMT_INCOME_TOTAL (Penghasilan)</b><p>Total pendapatan nasabah per tahun. Merupakan tolok ukur utama untuk menghitung batas rasio kredit dan beban finansial.</p></div>
+            <div className="cx-dict-item"><b>AMT_CREDIT (Ukuran Pinjaman)</b><p>Total plafon pinjaman yang dicairkan. Nilai ini seringkali lebih besar dari harga barang murni karena memperhitungkan asuransi, biaya admin, dan bunga.</p></div>
+            <div className="cx-dict-item"><b>AMT_ANNUITY (Anuitas / Cicilan)</b><p>Kewajiban bayar per periode (cicilan bulanan tetap) yang harus dilunasi oleh nasabah.</p></div>
+            <div className="cx-dict-item"><b>AMT_GOODS_PRICE (Harga Barang)</b><p>Harga ritel sebenarnya dari barang yang dibiayai oleh pinjaman konsumen ini (misalnya harga tunai kendaraan atau elektronik).</p></div>
+            <div className="cx-dict-item"><b>DAYS_BIRTH / AGE (Umur)</b><p>Umur nasabah saat mengajukan kredit. Data mentah berbentuk hari negatif (-15000) namun di dashboard ini langsung dikonversi ke satuan Tahun (misal: 41 th) agar intuitif.</p></div>
+            <div className="cx-dict-item"><b>DAYS_EMPLOYED / EMP (Masa Kerja)</b><p>Lama nasabah bekerja di perusahaan saat ini. Nasabah baru bekerja (1-3 tahun) sering belum memiliki tabungan kuat, sehingga berisiko tinggi.</p></div>
+            <div className="cx-dict-item"><b>CREDIT_TO_INCOME_RATIO (Leverage / CI)</b><p>Rasio Total Pinjaman dibagi Pendapatan Tahunan. Menunjukkan berapa kali lipat utang membebani gaji. Nasabah anomali sering memiliki leverage di atas 5×.</p></div>
+            <div className="cx-dict-item"><b>ANNUITY_TO_INCOME_RATIO (Beban Finansial / ANN)</b><p>Rasio Cicilan Bulanan dibagi Pendapatan. Menggambarkan kesempitan ruang finansial. Di atas 25% (0.25) biasanya sangat berisiko macet jika ada krisis.</p></div>
+            <div className="cx-dict-item"><b>NAME_EDUCATION_TYPE (Pendidikan)</b><p>Tingkat pendidikan tertinggi nasabah (SMA, Sarjana, dll). Sangat berkorelasi dengan kestabilan pekerjaan dan kedewasaan finansial.</p></div>
+            <div className="cx-dict-item"><b>NAME_INCOME_TYPE (Sumber Penghasilan)</b><p>Kategori pekerjaan utama (misal: Pegawai Swasta, Pensiunan, Wirausaha). Memengaruhi bobot penilaian risiko dasar.</p></div>
+            <div className="cx-dict-item"><b>REGION_RATING_CLIENT (Wilayah)</b><p>Peringkat demografis domisili nasabah. Tinggal di wilayah rating teratas terbukti sangat aman dan lancar dalam pelunasan.</p></div>
+          </div>
+        </div>
+
+        {/* KOLOM KANAN: ATURAN ASOSIASI */}
+        <div className="cx-card" style={{ alignSelf: "start" }}>
+          <div className="cx-card-head"><span className="cx-card-title">Daftar Lengkap 18 Aturan Asosiasi</span><span className="cx-note">Association Rules</span></div>
+          <div className="cx-dict-list">
+            
+            <h4 style={{ color: "#1FB894", margin: "0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Keamanan (Pasti Lunas)</h4>
+            <div className="cx-dict-item"><b>1. Kedua skor (EXT2 & EXT3) tinggi → Lunas</b><p>Kombinasi paling sakti. Jika kedua biro kredit memberi skor tinggi, nasabah memiliki probabilitas pelunasan di atas 97%.</p></div>
+            <div className="cx-dict-item"><b>2. Skor tinggi + Wilayah teratas → Lunas</b><p>Skor baik ditambah domisili di lingkungan elit/rating baik adalah garansi keamanan portofolio.</p></div>
+            <div className="cx-dict-item"><b>3. Kerja 15+ tahun + Skor tinggi → Lunas</b><p>Kestabilan karier (di atas 15 tahun di satu tempat) memberikan bantalan ekonomi yang kebal goncangan.</p></div>
+            <div className="cx-dict-item"><b>4. Skor tinggi + Pinjaman Revolving → Lunas</b><p>Nasabah unggul sangat pandai mengelola kartu kredit atau revolving loan tanpa menunggak.</p></div>
+
+            <h4 style={{ color: "#FF6B6B", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Risiko (Sinyal Gagal Bayar)</h4>
+            <div className="cx-dict-item"><b>5. Kedua skor eksternal rendah → Gagal bayar</b><p>Aturan terkuat (Lift 2.28×). Peluang macet meroket lebih dari dua kali lipat rata-rata portofolio.</p></div>
+            <div className="cx-dict-item"><b>6. Kerja 1–3 tahun + Skor rendah → Gagal bayar</b><p>Tenaga kerja baru tanpa tabungan darurat, ditambah histori kredit buruk, berakibat fatal pada pelunasan.</p></div>
+            <div className="cx-dict-item"><b>7. Pria + Skor rendah → Gagal bayar</b><p>Data demografis historis membuktikan pria dengan skor rendah secara konsisten lebih sering menunggak dibanding demografi lain.</p></div>
+            <div className="cx-dict-item"><b>8. Skor rendah + Harga barang menengah → Gagal bayar</b><p>Overkonsumsi: Memaksakan mencicil barang sekunder kelas menengah meski track record kredit sedang hancur.</p></div>
+            <div className="cx-dict-item"><b>9. Umur muda + Skor rendah → Gagal bayar</b><p>Nasabah di bawah 30 tahun seringkali masih labil secara emosional dan belum stabil secara finansial.</p></div>
+            <div className="cx-dict-item"><b>10. Ukuran pinjaman menengah + Skor rendah → Gagal bayar</b><p>Kredit jumlah tanggung sangat sering macet di pertengahan masa tenor pada nasabah berprofil lemah.</p></div>
+            <div className="cx-dict-item"><b>11 & 12. Kombinasi Spesifik EXT_SOURCE_3</b><p>Skor 3 secara terpisah dipadukan dengan <i>Barang Menengah</i> atau <i>Pekerja Baru</i> sudah cukup untuk memicu lonjakan probabilitas gagal bayar.</p></div>
+
+            <h4 style={{ color: "#9B5DE5", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Perilaku (Wawasan Produk)</h4>
+            <div className="cx-dict-item"><b>13 & 14. (Gaji rendah / Muda) + Revolving → Anuitas kecil</b><p>Nasabah muda atau bergaji pas-pasan menjadikan kartu kredit (revolving) sebagai tameng transaksi karena cicilan minimalnya (anuitas) sangat rendah dibanding kredit tunai.</p></div>
+            <div className="cx-dict-item"><b>15 & 16. Utang rendah + (SMA / Tanpa Mobil) → Pinjaman kecil</b><p>Nasabah tanpa aset besar dan pendidikan SMA cenderung sadar diri dan sangat konservatif; mereka selalu menghindari pinjaman berjumlah besar.</p></div>
+            <div className="cx-dict-item"><b>17 & 18. (Skor rendah / Tanpa anak) + Tinggal dgn ortu → Umur muda</b><p>Korelasi sosiologis yang sangat kuat: Mereka yang masih numpang di rumah orang tua dan belum punya anak didominasi secara absolut oleh demografi usia muda.</p></div>
+          </div>
         </div>
       </div>
     </>
@@ -943,6 +1054,7 @@ export default function Dashboard() {
           {tab === "phase2" && <Phase2 />}
           {tab === "phase3" && <Phase3 />}
           {tab === "phase4" && <Phase4 />}
+          {tab === "dictionary" && <Dictionary />}
         </main>
 
         <footer className="cx-foot">Group 1 | Created by Bioline - Lidya - Matthew - Hazel - Timotheus</footer>
@@ -1043,7 +1155,7 @@ const styles = `
 .cx-vbars{position:relative; padding-top:58px;}
 .cx-vplot{display:flex; align-items:flex-end; gap:16px; height:150px;}
 .cx-vcol{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; cursor:pointer;}
-.cx-vbar{width:100%; max-width:54px; border-radius:8px 8px 4px 4px; background:var(--card2); min-height:6px; transition:all .18s;}
+.cx-vbar{width:100%; max-width:54px; border-radius:8px 8px 4px 4px; background:var(--card2); min-height:6px; transition:all .4s ease;}
 .cx-vbar-on{background:var(--blue);}
 .cx-vlabel{margin-top:9px; font-size:11.5px; color:var(--muted);}
 .cx-vtip{position:absolute; top:0; transform:translateX(-50%); background:var(--card2); border:1px solid var(--line); border-radius:11px; padding:9px 13px; min-width:150px; text-align:center; transition:left .18s;}
@@ -1052,7 +1164,7 @@ const styles = `
 
 /* tracks / bars shared */
 .cx-track{height:9px; margin-top:7px; background:var(--card2); border-radius:999px; overflow:hidden;}
-.cx-fill{display:block; height:100%; border-radius:999px; transition:opacity .2s;}
+.cx-fill{display:block; height:100%; border-radius:999px; transition:all .4s ease;}
 .cx-fill-grad{background:var(--blue);}
 .cx-fill-warm{background:var(--warn);}
 
@@ -1071,7 +1183,7 @@ const styles = `
 .cx-svg-axis{stroke:var(--line); stroke-width:1.4;}
 .cx-svg-tick{font-family:var(--body); font-size:11px; fill:var(--muted);}
 .cx-svg-axlab{font-family:var(--body); font-size:10.5px; font-weight:600; letter-spacing:.04em; fill:var(--muted);}
-.cx-svg-prof{font-family:var(--body); font-size:14px; font-weight:600; fill:var(--ink); transition:opacity .2s;}
+.cx-svg-prof{font-family:var(--body); font-size:14px; font-weight:600; fill:var(--ink); transition:all .4s ease;}
 .cx-svg-profsub{font-family:var(--body); font-size:10.5px; fill:var(--dim);}
 .cx-svg-val{font-family:var(--body); font-size:13.5px; font-weight:700;}
 .cx-svg-delta{font-family:var(--body); font-size:12.5px; font-weight:700; fill:var(--muted);}
@@ -1126,7 +1238,8 @@ const styles = `
 .cx-toggle-on{color:#fff; background:var(--blue); border-color:transparent;}
 
 /* svg charts shared */
-.cx-cmap,.cx-radar,.cx-elbow,.cx-scatter{width:100%; height:auto; display:block; overflow:visible;}
+.cx-cmap,.cx-radar,.cx-elbow,.cx-scatter,.cx-dumbbell{width:100%; height:auto; display:block; overflow:visible;}
+.cx-cmap circle, .cx-radar path, .cx-radar text, .cx-radar line, .cx-elbow path, .cx-elbow circle, .cx-scatter circle, .cx-scatter path, .cx-dumbbell circle, .cx-dumbbell line { transition: all .4s ease; }
 .cx-cmap-id{font-family:var(--body); font-size:11px; font-weight:700; fill:#fff;}
 .cx-radar-lab{font-family:var(--body); font-size:10px; fill:var(--muted);}
 .cx-scatter-legend{display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin-top:8px; font-size:11.5px; color:var(--muted);}
@@ -1139,7 +1252,7 @@ const styles = `
 .cx-op-bars{display:flex; flex-direction:column; gap:7px;}
 .cx-op-bar{display:flex; align-items:center; gap:10px;}
 .cx-op-track{flex:1; height:9px; background:var(--card2); border-radius:999px; overflow:hidden;}
-.cx-op-fill{display:block; height:100%; border-radius:999px; transition:opacity .2s;}
+.cx-op-fill{display:block; height:100%; border-radius:999px; transition:all .4s ease;}
 .cx-op-v{min-width:42px; text-align:right; font-size:12px; font-weight:700; color:var(--muted);}
 .cx-op-leg{display:flex; gap:16px; font-size:11.5px; color:var(--muted); margin-top:2px;}
 .cx-op-leg span{display:inline-flex; align-items:center; gap:6px;}
@@ -1150,6 +1263,13 @@ const styles = `
 .cx-ph-title{font-size:14px; font-weight:600; color:var(--muted);}
 .cx-ph-txt{font-size:12.5px; color:var(--dim); line-height:1.65; margin:9px 0 0;}
 .cx code{background:var(--card2); border:1px solid var(--line); border-radius:5px; padding:1px 5px; font-size:11.5px; color:var(--ink); font-family:var(--mono,ui-monospace,monospace);}
+
+/* dictionary */
+.cx-dict-list{display:flex; flex-direction:column; gap:16px;}
+.cx-dict-item{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:16px; transition:border-color .2s;}
+.cx-dict-item:hover{border-color:var(--blue);}
+.cx-dict-item b{font-size:14px; color:var(--ink); display:block; margin-bottom:6px;}
+.cx-dict-item p{font-size:13px; color:var(--muted); margin:0; line-height:1.55;}
 
 @media (max-width:900px){
   .cx-kpis{grid-template-columns:1fr 1fr;}
