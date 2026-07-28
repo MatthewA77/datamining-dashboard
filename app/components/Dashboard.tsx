@@ -11,15 +11,294 @@
 
 import { useState, useEffect, type ReactNode } from "react";
 
+/* ============================ COLOR SYSTEM ============================ */
+/**
+ * One palette for the whole page, anchored on the Home Credit green.
+ * The two populations get two harmonised hue families so colour itself carries meaning:
+ *   PAID / lunas  → greens (teal → green → olive)
+ *   DEFAULT/gagal → warms  (rose → orange → deep rose)
+ * Semantic tokens sit on the same scale so charts, chips and text never drift apart.
+ */
+const C = {
+  safe: "#15803D",   // lunas / proteksi
+  risk: "#E11D48",   // gagal bayar / risiko
+  warn: "#D97706",   // anomali / perlu review
+  info: "#0F766E",   // metodologi / netral
+  ink: "#12211A",
+  muted: "#6B7666",
+  dim: "#9AA48F",
+  line: "#DFE5D4",
+  grid: "#D7DECB",
+  card: "#FFFFFF",
+  // paid personas — green family
+  P0: "#0F766E", P1: "#15803D", P2: "#4D7C0F",
+  // default personas — warm family
+  D0: "#E11D48", D1: "#EA580C", D2: "#9F1239",
+} as const;
+
 /* ============================ DATA ============================ */
 
 const BOOK = { customers: 307511, defaulters: 24825, repaid: 282686, defaultRate: 8.07 };
 
 const FUNNEL = [
-  { stage: "Semua feature yang dibuat", n: 680, note: "Hasil rekayasa dari tabel mentah." },
-  { stage: "Buang yang nyaris konstan", n: 493, note: "−187 kolom yang hampir tak pernah berubah." },
-  { stage: "Buang duplikat", n: 311, note: "−182 kolom yang mengulang sinyal sama." },
-  { stage: "Inti informatif disimpan", n: 185, note: "Sinyal yang benar-benar layak dianalisis." },
+  { stage: "Semua feature hasil agregasi + encoding", n: 680, note: "Gabungan 8 tabel mentah setelah feature engineering." },
+  { stage: "Variance Threshold (var < 0,01)", n: 493, note: "−187 kolom nyaris konstan — tak punya daya pisah, dibuang duluan karena murah." },
+  { stage: "Correlation Pruning (|r| > 0,9)", n: 311, note: "−182 kolom redundan — dua fitur ber-r>0,9 membawa info hampir identik." },
+  { stage: "Hierarchical Clustering korelasi (t = 0,4)", n: 185, note: "Redundansi berkelompok; tiap kelompok diwakili fitur paling sentral secara statistik." },
+];
+
+/* Stage 1 — data quality & cleaning audit (phase1.md §3) */
+const CLEANING_STEPS = [
+  { id: "dup", title: "Hapus duplikat", metric: "0", unit: "baris duplikat", detail: "Dedupe pada SK_ID_CURR — 1 nasabah harus 1 baris. Hasil: nol duplikat, kunci sudah unik.", why: "SK_ID_CURR adalah primary key; duplikat akan menggandakan bobot nasabah yang sama." },
+  { id: "sentinel", title: "Sentinel DAYS_EMPLOYED = 365243", metric: "~55.000", unit: "baris (~18%)", detail: "Nilai positif setara ≈1.000 tahun — kode 'tidak bekerja' (mayoritas pensiunan). Ditangani 2 langkah: simpan flag biner DAYS_EMPLOYED_ANOM, lalu nilai → NaN + imputasi median.", why: "Dibiarkan: outlier ekstrem merusak mean/varians & jarak clustering. Diisi 0: salah makna ('mulai kerja hari ini'). Dihapus: buang 55k nasabah nyata. NaN + flag menjaga makna tanpa kehilangan data." },
+  { id: "xna", title: "CODE_GENDER = 'XNA'", metric: "4", unit: "baris → modus", detail: "XNA = tidak diketahui (bukan gender ketiga). Diisi modus (F), dihitung tanpa menyertakan XNA sendiri.", why: "Kategorikal tak punya rata-rata; modus = tebakan paling mungkin. Hanya 4 dari 356k baris, dampak distribusi nyaris nol." },
+  { id: "miss50", title: "Drop kolom missing > 50%", metric: "37", unit: "kolom dibuang", detail: "Seluruh blok atribut properti (APARTMENTS/…_AVG/_MODE/_MEDI), OWN_CAR_AGE, dan EXT_SOURCE_1 (~56% kosong). SK_ID_CURR & TARGET dilindungi eksplisit.", why: "Di atas 50% kosong, imputasi lebih banyak 'tebakan' daripada data nyata." },
+  { id: "impute", title: "Imputasi sisa missing", metric: "0", unit: "nilai kosong tersisa", detail: "Numerik → median; kategorikal → modus. Diterapkan pada gabungan train+test agar skala & set kolom konsisten.", why: "Median tahan outlier (mean tertarik ekor panjang kolom finansial); modus = nilai paling mungkin untuk kategori." },
+  { id: "winsor", title: "Winsorize kolom moneter", metric: "p1 / p99", unit: "clipping", detail: "AMT_INCOME_TOTAL, AMT_CREDIT, AMT_ANNUITY, AMT_GOODS_PRICE di-clip ke persentil 1–99. Contoh: income di-cap ke rentang 45.000–486.000 (5.211 nilai tersentuh).", why: "Income ekstrem membajak skala MinMax & jarak clustering. Clip menahan 1% ekor tanpa membuang satu baris pun." },
+];
+
+/* Stage 1 — transformation & the two output pipelines (phase1.md §5, §8-9) */
+const TRANSFORM_STEPS = [
+  { title: "Label encoding (biner)", detail: "Kolom kategorikal dengan tepat 2 nilai di-map ke 0/1 langsung — tak perlu menambah dimensi.", tag: "Encoding" },
+  { title: "One-Hot encoding (sisanya)", detail: "Kategorikal multi-nilai diperluas jadi kolom dummy. Inilah sumber utama membengkaknya fitur ke 680.", tag: "Encoding" },
+  { title: "Agregasi ke level nasabah", detail: "Tiap tabel riwayat diringkas count/mean/max/sum ke SK_ID_CURR, lalu left-join → train_master (307.511 × 573). Prefix BURO_/PREV_/POS_/CC_/INST_ menandai asalnya.", tag: "Feature Engineering" },
+  { title: "Pipeline A — scaling untuk clustering", detail: "Kolom kontinu di-skala; kolom One-Hot dibiarkan apa adanya. Menghasilkan clustering_dataset.csv (185 fitur numerik).", tag: "Output" },
+  { title: "Pipeline B — binning untuk Apriori", detail: "19 atribut interpretable didiskretisasi jadi kategori bernama (quintile/tertile/ambang domain) → apriori_dataset.csv.", tag: "Output" },
+];
+
+/* Stage 2 — the three clustering algorithms, their parameters and justification (phase2.md §5–7) */
+type Algo = {
+  id: string; name: string; kind: string; scope: string; color: string;
+  params: { k: string; v: string; why: string }[];
+  result: string;
+  interpret: string;
+};
+const ALGOS: Algo[] = [
+  {
+    id: "kmeans", name: "K-Means", kind: "Partitional", scope: "Per tabel — DEFAULT & PAID di-cluster terpisah", color: C.safe,
+    params: [
+      { k: "K", v: "3 (dipilih independen tiap tabel)", why: "Silhouette tertinggi di antara solusi non-trivial (K ≥ 3), diselaraskan dengan siku inertia. Kedua tabel kebetulan sama-sama memilih 3." },
+      { k: "Input", v: "17 fitur → log1p → StandardScaler", why: "Fitur finansial sangat skewed; signed log1p menormalkan sebelum penskalaan." },
+      { k: "Scaler", v: "satu scaler untuk kedua tabel", why: "Di-fit pada seluruh populasi SEBELUM split, supaya DEFAULT & PAID berada di skala identik — prasyarat agar kontras lintas-populasi bermakna, bukan artefak skala." },
+    ],
+    result: "6 persona: D0/D1/D2 (gagal bayar) + P0/P1/P2 (lunas)",
+    interpret: "Silhouette rendah (≈0,09) adalah sinyal jujur bahwa data finansial berbentuk continuum, bukan gugus terpisah — konsisten dengan temuan DBSCAN & Hierarchical di bawah.",
+  },
+  {
+    id: "dbscan", name: "DBSCAN", kind: "Density-based", scope: "Sekali pada sampel 20k baris gabungan", color: C.warn,
+    params: [
+      { k: "Ruang", v: "17 fitur ter-PCA", why: "PCA mendekorelasi sumbu supaya jarak kepadatan tidak didominasi fitur yang saling berkorelasi." },
+      { k: "Sampel", v: "20.000 baris gabungan", why: "DBSCAN berskala kuadratik terhadap jumlah baris; sampel gabungan menjaga komputasi wajar tanpa memihak salah satu populasi." },
+      { k: "Penafsiran", v: "lewat label K-Means + TARGET", why: "DBSCAN meng-cluster vektor fitur, bukan label. Hasilnya dibaca ulang per populasi memakai label K-Means sebagai lensa." },
+    ],
+    result: "1 klaster padat + 199 noise (~1,0%)",
+    interpret: "Hanya satu klaster padat = data membentuk satu kontinum, bukan gumpalan terpisah. Noise rate DEFAULT 1,20% vs PAID 0,98% — outlier struktural sedikit lebih pekat di populasi gagal bayar, tapi selisihnya kecil.",
+  },
+  {
+    id: "hier", name: "Hierarchical (Agglomerative)", kind: "Hierarchical", scope: "Sekali pada sampel gabungan", color: C.P2,
+    params: [
+      { k: "Linkage", v: "4 dibandingkan → Ward dipakai", why: "Ward paling seimbang; single & average membentuk 'rantai' — ciri khas data kontinum, bukan gugus." },
+      { k: "Validasi", v: "Adjusted Rand Index (ARI)", why: "Mengukur kesepakatan partisi terhadap partisi lain, sudah dikoreksi terhadap kebetulan." },
+    ],
+    result: "ARI Ward(K=2) vs TARGET = −0,001",
+    interpret: "Nyaris nol: default & paid BUKAN dua gumpalan geometris terpisah — mereka tumpang tindih. Justru inilah pembenaran memisahkan tabel lebih dulu secara supervised; clustering unsupervised tak akan pernah memulihkan pemisahan itu sendiri. ARI Ward vs K-Means: DEFAULT 0,22 / PAID 0,25 (kesepakatan moderat, wajar untuk continuum).",
+  },
+];
+
+/* Stage 5 — Knowledge synthesis: "What knowledge did we discover?" (rubrik 5.2 Excellent) */
+type Knowledge = {
+  id: string; headline: string; claim: string; kind: "risk" | "safe" | "method";
+  evidence: { phase: string; text: string }[];
+  action: string;
+  value: string;
+};
+const KNOWLEDGE: Knowledge[] = [
+  {
+    id: "ext", kind: "risk",
+    headline: "Skor kredit eksternal — bukan besarnya pinjaman — yang memisahkan gagal bayar dari lunas",
+    claim: "Di setiap pasangan segmen yang profil pinjamannya setara, pembedanya selalu skor EXT_SOURCE yang lebih rendah. Besar pinjaman dan penghasilan hampir tidak membedakan apa-apa ketika dibandingkan secara adil.",
+    evidence: [
+      { phase: "Fase 1", text: "Mutual Information menempatkan EXT_SOURCE_2 (0,0154) dan EXT_SOURCE_3 (0,0127) di puncak, terpaut jelas dari fitur berikutnya (anuitas 0,0095)." },
+      { phase: "Fase 2", text: "Ketiga pasangan kembar lintas-populasi berbeda konsisten pada skor: D0↔P1 −0,13 · D1↔P0 −0,11 · D2↔P2 −0,10 — pada leverage yang setara." },
+      { phase: "Fase 3", text: "Kedelapan aturan risiko berporos pada EXT_SOURCE=Low; kombinasi kedua skor rendah memberi lift tertinggi 2,28×." },
+    ],
+    action: "Prioritaskan verifikasi skor pihak-ketiga di underwriting, dan beri bobot terbesar pada fitur ini beserta interaksinya di model scoring.",
+    value: "Pembeda paling tajam yang tersedia — berlaku lintas semua segmen, bukan hanya sebagian.",
+  },
+  {
+    id: "interaction", kind: "risk",
+    headline: "Risiko lahir dari interaksi, bukan dari satu atribut mana pun",
+    claim: "Tidak satu pun atribut tunggal cukup untuk menaikkan risiko secara berarti. Default melonjak hanya ketika skor rendah berpasangan dengan faktor kerentanan kedua — masa kerja pendek, usia muda, atau leverage menengah.",
+    evidence: [
+      { phase: "Fase 3", text: "Semua aturan risiko yang lolos ambang adalah kombinasi 2 item. Skor rendah sendirian tidak masuk daftar; berpasangan, liftnya 1,88–2,28×." },
+      { phase: "Fase 3", text: "EXT_SOURCE_2 dan EXT_SOURCE_3 adalah dua skor independen yang menghasilkan pola risiko sama — saling memvalidasi, bukan artefak satu sumber." },
+      { phase: "Fase 2", text: "Persona D0 (muda + skor terendah) memang punya kedua faktor sekaligus — konsisten dengan aturan #15 di Fase 3." },
+    ],
+    action: "Rancang credit scoring berbasis interaksi (kombinasi fitur), bukan ambang per-atribut yang dievaluasi sendiri-sendiri.",
+    value: "Menjelaskan kenapa scorecard sederhana per-atribut gagal menangkap segmen berisiko ini.",
+  },
+  {
+    id: "twins", kind: "risk",
+    headline: "Ada “kembaran berisiko”: profil pinjaman identik dengan nasabah baik, tapi skor lebih rendah",
+    claim: "Untuk tiap persona gagal bayar, ada persona lunas dengan profil pinjaman nyaris identik. Mereka tak bisa dibedakan lewat besar pinjaman, penghasilan, atau leverage — hanya lewat skor dan usia/masa kerja.",
+    evidence: [
+      { phase: "Fase 2", text: "D0↔P1 sama-sama pinjaman kecil (rasio ~2); D1↔P0 sama-sama over-leveraged (rasio ~6,4–6,9); D2↔P2 sama-sama berpenghasilan tinggi dengan pinjaman terjangkau." },
+      { phase: "Fase 2", text: "Yang gagal bayar konsisten 1–5 tahun lebih muda dan masa kerjanya lebih pendek." },
+    ],
+    action: "Fokuskan underwriting pada nasabah yang mirip profil segmen aman tetapi ber-EXT_SOURCE rendah — inilah titik di mana keputusan paling sering salah.",
+    value: "Jauh lebih tajam daripada “segmen ini default rate-nya tinggi”, karena membandingkan yang setara.",
+  },
+  {
+    id: "notgeom", kind: "method",
+    headline: "Gagal bayar dan lunas bukan dua gumpalan terpisah di ruang fitur — mereka tumpang tindih",
+    claim: "Struktur geometris data sama sekali tidak sejajar dengan label pelunasan. Clustering unsupervised tidak akan pernah menemukan pemisahan default/paid dengan sendirinya.",
+    evidence: [
+      { phase: "Fase 2", text: "ARI Ward (K=2) terhadap TARGET = −0,001 — praktis nol, artinya tak ada kesepakatan sama sekali." },
+      { phase: "Fase 2", text: "DBSCAN menemukan hanya 1 klaster padat + 199 noise (~1,0%): data membentuk satu kontinum, bukan gugus terpisah." },
+      { phase: "Fase 2", text: "Silhouette K-Means rendah (≈0,09) di kedua tabel — konsisten dengan sifat continuum, bukan kegagalan model." },
+    ],
+    action: "Inilah pembenaran memisahkan tabel lebih dulu secara supervised (DEFAULT vs PAID), lalu meng-cluster masing-masing. Jangan berharap segmentasi murni unsupervised memulihkan risiko.",
+    value: "Keputusan metodologis yang bisa dipertahankan dengan angka, bukan selera.",
+  },
+  {
+    id: "anomaly", kind: "method",
+    headline: "Anomali statistik bukan sinyal gagal bayar — keduanya mengukur hal berbeda",
+    claim: "Anomali justru menumpuk di persona berpinjaman besar, dan lebih pekat di populasi yang LUNAS. Deteksi anomali menangkap magnitude finansial; risiko gagal bayar ditentukan skor yang “biasa-biasa tapi buruk”.",
+    evidence: [
+      { phase: "Fase 4", text: "High-confidence anomaly: populasi paid 10,05% vs default 6,87% — terbalik dari dugaan intuitif." },
+      { phase: "Fase 4", text: "Menumpuk di P0 (15,0%), P2 (12,6%), D1 (10,6%) — semuanya persona leverage/pinjaman besar; persona pinjaman kecil D0 (2,4%) dan P1 (3,8%) justru bersih." },
+      { phase: "Fase 4", text: "RARE_LEGITIMATE (26.139 nasabah) punya default 5,20% — di BAWAH base rate 8,07%." },
+    ],
+    action: "Pisahkan pipeline anomaly review dari credit risk scoring. Anomali dipakai untuk audit & manual review, bukan sebagai proxy risiko.",
+    value: "Mencegah kesalahan mahal: menolak nasabah kaya yang sah karena angkanya terlihat ekstrem.",
+  },
+  {
+    id: "safeseg", kind: "safe",
+    headline: "Segmen aman besar dan mudah dikenali: 12,3% nasabah dengan pelunasan 97,7%",
+    claim: "Kombinasi kedua skor eksternal tinggi menandai sekitar 38.000 nasabah yang hampir pasti lunas — segmen tunggal terbesar sekaligus paling andal dalam seluruh analisis.",
+    evidence: [
+      { phase: "Fase 3", text: "Aturan proteksi #8: EXT_SOURCE_2=High + EXT_SOURCE_3=High → Repaid, confidence 97,7% pada support 12,3%." },
+      { phase: "Fase 3", text: "Tiga aturan proteksi lain (wilayah rating atas, masa kerja 15+ th, revolving) semuanya di atas 97,5% confidence." },
+      { phase: "Fase 2", text: "Persona P2 (prima, penghasilan tinggi) punya skor EXT_2 tertinggi 0,56 — konsisten dengan segmen ini." },
+    ],
+    action: "Fast-track approval dan upsell premium untuk segmen ini; alokasikan kapasitas review manual ke tempat lain.",
+    value: "Sisi pertumbuhan dari analisis yang sama — bukan cuma menolak risiko, tapi mempercepat yang aman.",
+  },
+  {
+    id: "revolving", kind: "safe",
+    headline: "Revolving adalah produk cicilan-ringan yang dipilih segmen muda & berpenghasilan rendah",
+    claim: "Pola perilaku yang tak terlihat lewat agregasi sederhana: nasabah muda atau bergaji rendah memilih revolving karena anuitasnya sangat kecil, bukan karena limitnya besar.",
+    evidence: [
+      { phase: "Fase 3", text: "INCOME=VeryLow + Revolving → ANNUITY=VeryLow: confidence 94,9%, lift 4,75× (tertinggi di seluruh aturan perilaku)." },
+      { phase: "Fase 3", text: "AGE_GROUP=Young + Revolving → ANNUITY=VeryLow: confidence 89,2%, lift 4,46×." },
+      { phase: "Fase 3", text: "“Tinggal dengan orang tua” andal menandai nasabah muda thin-file (lift 3,86–3,89×) — proxy berguna saat riwayat kredit minim." },
+    ],
+    action: "Kembangkan produk mikro berbasis revolving sebagai kanal akuisisi anak muda, dengan plafon starter yang naik bertahap.",
+    value: "Peluang produk yang muncul dari data, bukan dari asumsi pemasaran.",
+  },
+];
+const KIND_META: Record<Knowledge["kind"], { label: string; color: string }> = {
+  risk: { label: "Sinyal risiko", color: C.risk },
+  safe: { label: "Peluang bisnis", color: C.safe },
+  method: { label: "Temuan metodologis", color: C.info },
+};
+
+/* Stage 4 — per-feature IQR rates + skew evidence why Z-score under-flags (phase4.md §2–3) */
+const IQR_BY_FEATURE = [
+  { feat: "BURO_AMT_CREDIT_SUM_DEBT_MEAN", iqr: 10.69, z: 1.10, skew: 22.34, note: "Utang eksternal berekor sangat panjang." },
+  { feat: "EMPLOYMENT_YEARS", iqr: 7.43, z: null, skew: null, note: "Sebagian nasabah masa kerja sangat panjang." },
+  { feat: "INST_PAYMENT_DELAY_MEAN", iqr: 5.67, z: 0.93, skew: 24.10, note: "Keterlambatan bayar (dua arah)." },
+  { feat: "AMT_INCOME_TOTAL", iqr: 4.56, z: null, skew: null, note: "Income tinggi." },
+  { feat: "AGE_YEARS / EXT_SOURCE_2", iqr: 0, z: null, skew: null, note: "Terdistribusi rapat — tak ada ekor ekstrem sama sekali." },
+];
+
+/* Stage 4 — DBSCAN cross-reference convergence (phase4.md §6) */
+const DBSCAN_XREF = [
+  { label: "Juga terflag IQR", pct: 97.0, n: 193, color: C.info },
+  { label: "Juga high-confidence (≥2 metode)", pct: 93.0, n: 185, color: C.safe },
+  { label: "Juga terflag Isolation Forest", pct: 15.6, n: 31, color: C.warn },
+];
+
+/* Stage 4 — anomaly classification with default-rate validation (phase4.md §7) */
+const ANOM_CLASSES = [
+  {
+    id: "risk", name: "RISK_SIGNAL", count: 3983, rate: 8.69, ci: "10,53", ext: "0,538", color: C.risk,
+    rule: "kredit/income > 15 · anuitas/income > 0,5 · kedua EXT_SOURCE < 0,2 · rata-rata telat > 30 hari",
+    verdict: "Default 8,69% — di ATAS base rate 8,07%, dan median kredit/income 10,5 (vs 3,3 populasi). Leverage ekstrem nyata → layak eskalasi ke manual underwriting review.",
+    example: "SK_ID_CURR 124157 — income 45k tapi kredit 1,86 jt → rasio 41,3; beban anuitas 1,07 (cicilan melebihi penghasilan!); EXT_2 0,18 → TARGET = 1.",
+  },
+  {
+    id: "rare", name: "RARE_LEGITIMATE", count: 26139, rate: 5.20, ci: "3,82", ext: "0,612", color: C.safe,
+    rule: "ekstrem pada magnitude, tapi kombinasinya tetap konsisten",
+    verdict: "Default 5,20% — di BAWAH base rate, dan skor eksternal median lebih tinggi (0,61). Ini membuktikan klasifikasinya bekerja: yang kita sebut 'sah' memang lebih aman dari rata-rata. Jangan tolak otomatis.",
+    example: "SK_ID_CURR 403769 — income 486k (maksimum) + kredit 1,86 jt tapi rasio hanya 3,82 (wajar), skor tinggi, masa kerja 34 th → TARGET = 0. Nasabah kaya sungguhan.",
+  },
+  {
+    id: "err", name: "DATA_ERROR", count: 0, rate: null, ci: "—", ext: "—", color: C.dim,
+    rule: "11 kondisi mustahil diuji eksplisit",
+    verdict: "Nol menyeluruh. Ini hasil positif, bukan absennya pencarian — 11 kondisi diuji eksplisit, termasuk cek konsistensi antar-kolom (kerja > umur, cicilan > kredit) yang tak mungkin nol secara kebetulan. Mengonfirmasi pipeline cleaning Fase 1 sudah tuntas.",
+    example: "Kategori tetap didefinisikan di classify() agar lengkap — hanya saja kosong pada dataset yang sudah bersih ini.",
+  },
+];
+const INTEGRITY_CHECKS = [
+  "EMPLOYMENT_YEARS > 60 th", "Sisa sentinel DAYS_EMPLOYED = 365243", "AMT_INCOME_TOTAL ≤ 0",
+  "AMT_CREDIT ≤ 0", "AMT_ANNUITY ≤ 0", "AGE_YEARS < 18 atau > 100",
+  "EMPLOYMENT_YEARS > AGE_YEARS", "AMT_ANNUITY > AMT_CREDIT", "CREDIT_INCOME_RATIO > 50",
+  "EXT_SOURCE_2/3 di luar [0,1]", "NaN tersisa di fitur deteksi",
+];
+
+/* Stage 3 — discretization: bin boundaries + domain rationale (phase3.md §2) */
+const BINS = [
+  { attr: "AGE_GROUP", cats: "Young / Adult / MiddleAged / Senior", rule: "<30 / 30–45 / 45–60 / 60+ th", basis: "domain", why: "Tahap siklus hidup finansial punya profil risiko berbeda." },
+  { attr: "INCOME_LEVEL", cats: "VeryLow … VeryHigh", rule: "Quintile pendapatan", basis: "quintile", why: "Kelas relatif terhadap populasi, bukan ambang absolut yang bias mata uang." },
+  { attr: "CREDIT_LEVEL", cats: "VerySmall … VeryLarge", rule: "Quintile AMT_CREDIT", basis: "quintile", why: "Skala pinjaman relatif." },
+  { attr: "ANNUITY_LEVEL", cats: "VeryLow … VeryHigh", rule: "Quintile cicilan", basis: "quintile", why: "Beban cicilan periodik." },
+  { attr: "GOODS_PRICE_LEVEL", cats: "VerySmall … VeryLarge", rule: "Quintile harga barang", basis: "quintile", why: "Nilai objek yang dibiayai." },
+  { attr: "DEBT_BURDEN", cats: "VeryLow … VeryHigh", rule: "anuitas/income: <5 / 5–10 / 10–20 / 20–35 / >35%", basis: "domain", why: "Debt-service ratio klasik — punya makna finansial baku lintas populasi." },
+  { attr: "EMPLOYMENT_YEARS", cats: "<1 / 1–3 / 3–7 / 7–15 / 15+ th", rule: "ambang masa kerja", basis: "domain", why: "Stabilitas penghasilan naik bertahap, bukan linear." },
+  { attr: "EXT_SOURCE_2/3_LEVEL", cats: "Low / Medium / High", rule: "Tertile skor", basis: "tertile", why: "Kualitas kredit eksternal dibagi tiga agar tiap kategori cukup besar." },
+  { attr: "CHILDREN", cats: "Zero / 1–2 / 3+", rule: "jumlah anak", basis: "domain", why: "Beban tanggungan." },
+];
+const BASIS_COL: Record<string, string> = { quintile: C.info, tertile: C.P2, domain: C.warn };
+
+/* Stage 3 — Apriori funnel with parameters (phase3.md §3–6) */
+const APRIORI_FUNNEL = [
+  { stage: "Item unik (one-hot)", n: 81, of: 81, note: "20 atribut kategorikal × beberapa nilai → 81 item. Ini 'kosakata' yang bisa muncul di aturan.", param: "prefix_sep '='" },
+  { stage: "Frequent itemsets", n: 25228, of: 81710, note: "73 len-1 · 2.021 len-2 · 23.134 len-3.", param: "min_support = 0,01 · max_len = 3" },
+  { stage: "Aturan mentah", n: 81710, of: 81710, note: "Terlalu banyak & banyak yang sepele — filter longgar hanya membuang asosiasi negatif.", param: "lift ≥ 1,0" },
+  { stage: "Aturan non-trivial", n: 33131, of: 81710, note: "Setelah membuang consequent ganda, 10 pasangan tautologi/definisional, dan support < 1%.", param: "n_con = 1 · anti-tautologi" },
+  { stage: "Deliverable final", n: 18, of: 81710, note: "8 risiko + 4 proteksi + 6 perilaku, ter-ranking & dedupe per kombinasi atribut antecedent.", param: "lift ≥ 1,5 (risiko) · conf tinggi (proteksi)" },
+];
+const APRIORI_PARAMS = [
+  { k: "min_support", v: "0,01 (1%)", why: "Pola harus muncul pada ≥ 3.075 nasabah. Sengaja rendah: kelas Default hanya ~8%, jadi kombinasi berisiko secara alami ber-support kecil. Kalau dipasang 0,05, semua pola risiko terbuang sebelum sempat dianalisis." },
+  { k: "max_len", v: "3", why: "Antecedent maksimal 2 item. Aturan {A,B} → C masih mudah dijelaskan ke tim bisnis; aturan 5-item tidak. Sekaligus mencegah ledakan kombinatorik." },
+  { k: "Metrik seleksi", v: "Lift", why: "Membuang bias base-rate: aturan bisa punya confidence tinggi hanya karena consequent-nya memang umum." },
+  { k: "Ambang → Default", v: "lift ≥ 1,5", why: "Naik ≥ 50% di atas base rate 8%. Confidence tidak dipakai karena confidence menuju Default secara natural rendah — memakai conf ≥ 0,3 akan membunuh SEMUA aturan risiko." },
+  { k: "Ambang → Repaid", v: "conf tinggi + support ≥ 3%", why: "Karena Repaid ≈ 92%, lift maksimum teoretis hanya 1/0,92 ≈ 1,09. Aturan proteksi karena itu dinilai lewat confidence, bukan lift." },
+  { k: "Anti-tautologi", v: "10 pasangan atribut", why: "DEBT_BURDEN dihitung dari anuitas/income, jadi {ANNUITY=High, INCOME=Low} → DEBT_BURDEN=VeryHigh itu aritmetika, bukan temuan. Sama untuk CREDIT ↔ GOODS_PRICE (r ≈ 0,99) dan Pensioner ≡ Senior." },
+];
+const METRICS_DEF = [
+  { name: "Support", formula: "P(X)", reads: "Seberapa umum pola itu", example: "Support 0,0224 = pola muncul pada 2,24% nasabah (≈ 6.900 orang).", color: C.info },
+  { name: "Confidence", formula: "P(Y|X) = Support(X∪Y) / Support(X)", reads: "Seberapa andal aturannya", example: "Confidence 18,4% = dari semua nasabah dengan kedua skor rendah, 18,4% benar-benar gagal bayar.", color: C.P2 },
+  { name: "Lift", formula: "Confidence / Support(Y)", reads: "Lebih sering dari kebetulan?", example: "Lift 2,28 = kombinasi itu menaikkan peluang gagal bayar 2,28× di atas base rate 8,07%.", color: C.risk },
+];
+
+/* Stage 2 — segmentation feature selection (phase2.md §1–2) */
+const SEG_FS = [
+  { rule: "Density", detail: "Buang fitur dengan > 40% nilai 0", why: "Fitur sparse tak membedakan mayoritas nasabah." },
+  { rule: "Variance", detail: "Buang near-constant (std ≈ 0 setelah skala)", why: "Tanpa dispersi tak ada yang bisa di-cluster." },
+  { rule: "Redundancy", detail: "Correlation pruning |r| > 0,8", why: "Jarak tak boleh menghitung ganda sinyal yang sama." },
+];
+const ZERO_INFLATION = [
+  { thr: "≥ 50%", n: 125 }, { thr: "≥ 80%", n: 100 }, { thr: "≥ 90%", n: 75 }, { thr: "≥ 95%", n: 53 }, { thr: "≥ 99%", n: 7 },
+];
+
+/* Stage 1 — feature-selection methods, named (rubrik minta metode disebut + interpretasi) */
+const FS_METHODS = [
+  { n: "1", name: "Variance Threshold", param: "var < 0,01", drop: "−187", keep: 493, unsup: true, note: "Fitur nyaris konstan (dummy One-Hot yang hampir selalu 0) tak memberi daya pisah." },
+  { n: "2", name: "Correlation Pruning", param: "|r| > 0,9", drop: "−182", keep: 311, unsup: true, note: "Mengurangi multikolinearitas & ketidakstabilan jarak antar-record." },
+  { n: "3", name: "Hierarchical Clustering korelasi", param: "jarak 1−|r|, potong t = 0,4", drop: "−126", keep: 185, unsup: true, note: "Menangkap redundansi berkelompok, bukan hanya pasangan. Wakil tiap kelompok = fitur paling sentral." },
+  { n: "4", name: "Mutual Information", param: "sampel 40k, ke TARGET", drop: "0", keep: 185, unsup: false, note: "Hanya untuk ranking kepentingan — tidak membuang fitur, supaya tidak terjadi circularity dengan label." },
 ];
 
 type Pair = { key: string; profile: string; ratio: string; paid: { id: string; v: number }; def: { id: string; v: number }; dScore: string; dAge: string; plain: string };
@@ -30,14 +309,14 @@ const PAIRS: Pair[] = [
 ];
 type Persona = { id: string; name: string; share: number; score: number; count: number; color: string; trait: string };
 const PAID_PERSONAS: Persona[] = [
-  { id: "P0", name: "Mapan, skor kuat", share: 29.0, score: 0.52, count: 81860, color: "#5B8DEF", trait: "Tertua, masa kerja terpanjang, leverage tinggi — tapi skor kuat." },
-  { id: "P1", name: "Konservatif, pinjaman kecil", share: 37.0, score: 0.5, count: 104585, color: "#4FD1C5", trait: "Pinjaman terkecil; skor kredit solid." },
-  { id: "P2", name: "Prima, penghasilan tinggi", share: 34.0, score: 0.56, count: 96241, color: "#9B5DE5", trait: "Penghasilan tertinggi, kredit besar terjangkau, skor teratas." },
+  { id: "P0", name: "Mapan, skor kuat", share: 29.0, score: 0.52, count: 81860, color: C.P0, trait: "Tertua, masa kerja terpanjang, leverage tinggi — tapi skor kuat." },
+  { id: "P1", name: "Konservatif, pinjaman kecil", share: 37.0, score: 0.5, count: 104585, color: C.P1, trait: "Pinjaman terkecil; skor kredit solid." },
+  { id: "P2", name: "Prima, penghasilan tinggi", share: 34.0, score: 0.56, count: 96241, color: C.P2, trait: "Penghasilan tertinggi, kredit besar terjangkau, skor teratas." },
 ];
 const DEF_PERSONAS: Persona[] = [
-  { id: "D0", name: "Muda, pinjaman kecil, skor lemah", share: 35.2, score: 0.37, count: 8739, color: "#FF6B6B", trait: "Termuda; pinjaman terkecil; skor terendah." },
-  { id: "D1", name: "Terlampau terungkit", share: 30.5, score: 0.41, count: 7572, color: "#F5A524", trait: "Penghasilan rendah, kredit besar — paling ketat." },
-  { id: "D2", name: "Menengah, skor rendah", share: 34.3, score: 0.46, count: 8514, color: "#E15B9E", trait: "Penghasilan lebih tinggi, pinjaman terjangkau, tapi skor lemah." },
+  { id: "D0", name: "Muda, pinjaman kecil, skor lemah", share: 35.2, score: 0.37, count: 8739, color: C.D0, trait: "Termuda; pinjaman terkecil; skor terendah." },
+  { id: "D1", name: "Terlampau terungkit", share: 30.5, score: 0.41, count: 7572, color: C.D1, trait: "Penghasilan rendah, kredit besar — paling ketat." },
+  { id: "D2", name: "Menengah, skor rendah", share: 34.3, score: 0.46, count: 8514, color: C.D2, trait: "Penghasilan lebih tinggi, pinjaman terjangkau, tapi skor lemah." },
 ];
 
 type Rule = { label: string; value: number; tag: string; action: string };
@@ -72,11 +351,17 @@ const TABS = [
   { id: "phase2", label: "Clustering", title: "Fase 2 · Clustering", kicker: "Yang lunas vs yang gagal bayar" },
   { id: "phase3", label: "Association Rules", title: "Fase 3 · Association Rules", kicker: "Kombinasi yang menandakan risiko" },
   { id: "phase4", label: "Outlier", title: "Fase 4 · Outlier", kicker: "Deteksi kredit yang tak lazim" },
+  { id: "knowledge", label: "Knowledge", title: "What Knowledge Did We Discover?", kicker: "Sintesis empat fase menjadi pengetahuan yang bisa ditindaklanjuti" },
   { id: "dictionary", label: "Rules & Directory", title: "Rules & Features Directory", kicker: "Glosarium fitur dan penjelasan lengkap aturan asosiasi" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
-type Chip = { tone: "up" | "down" | "warn" | "flat"; text: string };
+/**
+ * Tone drives both the chip colour and its sparkline.
+ * up/down/warn carry judgement (baik / berisiko / perlu perhatian);
+ * info/olive/flat are descriptive accents for panels where nothing is good or bad.
+ */
+type Chip = { tone: "up" | "down" | "warn" | "flat" | "info" | "olive"; text: string };
 type Kpi = { label: string; value: string; icon: string; chip: Chip };
 const KPIS: Record<TabId, Kpi[]> = {
   overview: [
@@ -87,9 +372,9 @@ const KPIS: Record<TabId, Kpi[]> = {
   ],
   about: [
     { label: "Tabel dataset", value: "8", icon: "layers", chip: { tone: "flat", text: "saling terhubung relasional" } },
-    { label: "Kunci penghubung", value: "3", icon: "target", chip: { tone: "flat", text: "SK_ID_CURR / BUREAU / PREV" } },
-    { label: "Kolom dideskripsikan", value: "219", icon: "chart", chip: { tone: "flat", text: "HomeCredit_columns_description" } },
-    { label: "Baris tabel inti", value: "307,511", icon: "users", chip: { tone: "flat", text: "application_train" } },
+    { label: "Kunci penghubung", value: "3", icon: "target", chip: { tone: "info", text: "SK_ID_CURR / BUREAU / PREV" } },
+    { label: "Kolom dideskripsikan", value: "219", icon: "chart", chip: { tone: "olive", text: "HomeCredit_columns_description" } },
+    { label: "Baris tabel inti", value: "307,511", icon: "users", chip: { tone: "up", text: "application_train" } },
   ],
   phase1: [
     { label: "Baris data kredit", value: "307,511", icon: "users", chip: { tone: "flat", text: "baris disimpan" } },
@@ -115,6 +400,12 @@ const KPIS: Record<TabId, Kpi[]> = {
     { label: "Sinyal risiko", value: "3,983", icon: "alert", chip: { tone: "down", text: "review manual" } },
     { label: "Data error", value: "0", icon: "check", chip: { tone: "up", text: "semua cek lolos" } },
   ],
+  knowledge: [
+    { label: "Pengetahuan utama", value: "7", icon: "target", chip: { tone: "flat", text: "lintas 4 fase" } },
+    { label: "Pembeda terkuat", value: "EXT_SOURCE", icon: "chart", chip: { tone: "down", text: "konsisten di 3 fase" } },
+    { label: "Segmen aman terbesar", value: "12,3%", icon: "check", chip: { tone: "up", text: "97,7% lunas" } },
+    { label: "Perlu review manual", value: "3,983", icon: "alert", chip: { tone: "warn", text: "risk signal" } },
+  ],
   dictionary: [
     { label: "Total Fitur", value: "11", icon: "layers", chip: { tone: "flat", text: "fitur utama" } },
     { label: "Aturan Disimpan", value: "18", icon: "chart", chip: { tone: "flat", text: "dari 81.710" } },
@@ -135,9 +426,9 @@ const DATASET_FILES = [
 ];
 
 const RELATION_KEYS = [
-  { key: "SK_ID_CURR", color: "#16A34A", desc: "ID nasabah/aplikasi saat ini — kunci utama tabel inti (application).", files: ["application_train.csv", "application_test.csv", "bureau.csv", "previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
-  { key: "SK_ID_BUREAU", color: "#9B5DE5", desc: "ID satu kredit di biro kredit eksternal — penghubung bureau ↔ bureau_balance.", files: ["bureau.csv", "bureau_balance.csv"] },
-  { key: "SK_ID_PREV", color: "#F5A524", desc: "ID satu aplikasi/kredit Home Credit sebelumnya — penghubung previous_application ↔ POS/CC/installments.", files: ["previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
+  { key: "SK_ID_CURR", color: "#15803D", desc: "ID nasabah/aplikasi saat ini — kunci utama tabel inti (application).", files: ["application_train.csv", "application_test.csv", "bureau.csv", "previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
+  { key: "SK_ID_BUREAU", color: "#4D7C0F", desc: "ID satu kredit di biro kredit eksternal — penghubung bureau ↔ bureau_balance.", files: ["bureau.csv", "bureau_balance.csv"] },
+  { key: "SK_ID_PREV", color: "#D97706", desc: "ID satu aplikasi/kredit Home Credit sebelumnya — penghubung previous_application ↔ POS/CC/installments.", files: ["previous_application.csv", "POS_CASH_balance.csv", "credit_card_balance.csv", "installments_payments.csv"] },
 ];
 
 const REL_NODES: Record<string, { x: number; y: number; w: number; h: number; label: string }> = {
@@ -157,7 +448,7 @@ const REL_EDGES: { from: string; to: string; key: string }[] = [
   { from: "prev", to: "cc", key: "SK_ID_PREV" },
   { from: "prev", to: "inst", key: "SK_ID_PREV" },
 ];
-const KEYCOLOR: Record<string, string> = { SK_ID_CURR: "#16A34A", SK_ID_BUREAU: "#9B5DE5", SK_ID_PREV: "#F5A524" };
+const KEYCOLOR: Record<string, string> = { SK_ID_CURR: "#15803D", SK_ID_BUREAU: "#4D7C0F", SK_ID_PREV: "#D97706" };
 
 const RELATION_CARDINALITY = [
   { rel: "application → bureau", card: "1 nasabah : rata-rata 5,6 kredit eksternal (maks 116)", proof: "1,72 jt baris untuk 305.811 nasabah" },
@@ -222,6 +513,8 @@ const SPARK: Record<Chip["tone"], number[]> = {
   down: [82, 70, 76, 58, 64, 46, 50, 32, 38, 20],
   warn: [46, 60, 40, 56, 38, 62, 42, 66, 36, 54],
   flat: [50, 55, 47, 52, 46, 54, 48, 52, 47, 51],
+  info: [36, 52, 44, 66, 50, 74, 58, 62, 70, 54],
+  olive: [64, 48, 70, 54, 78, 46, 66, 58, 74, 50],
 };
 
 function Spark({ tone }: { tone: Chip["tone"] }) {
@@ -255,9 +548,13 @@ type Seg = { label: string; value: number; color: string };
 function Donut({ segments, center, sub }: { segments: Seg[]; center: string; sub: string }) {
   const [h, setH] = useState<number | null>(null);
   const total = segments.reduce((a, s) => a + s.value, 0);
-  const R = 54, SW = 15, C = 2 * Math.PI * R;
-  let acc = 0;
-  const arcs = segments.map((s, i) => { const len = (s.value / total) * C; const startDeg = -90 + (acc / C) * 360; acc += len; return { s, i, len, startDeg }; });
+  // CIRC, not C — C is the global colour-token object
+  const R = 54, SW = 15, CIRC = 2 * Math.PI * R;
+  const arcs = segments.reduce<{ s: Seg; i: number; len: number; startDeg: number }[]>((acc, s, i) => {
+    const used = acc.reduce((t, a) => t + a.len, 0);
+    acc.push({ s, i, len: (s.value / total) * CIRC, startDeg: -90 + (used / CIRC) * 360 });
+    return acc;
+  }, []);
   const big = h === null ? center : fmt(segments[h].value);
   const small = h === null ? sub : segments[h].label;
   return (
@@ -267,7 +564,7 @@ function Donut({ segments, center, sub }: { segments: Seg[]; center: string; sub
           {arcs.map((a) => (
             <g key={a.i} transform={`rotate(${a.startDeg} 70 70)`}>
               <circle cx="70" cy="70" r={R} fill="none" stroke={a.s.color} strokeWidth={SW}
-                strokeDasharray={`${a.len} ${C - a.len}`}
+                strokeDasharray={`${a.len} ${CIRC - a.len}`}
                 style={{ opacity: h === null || h === a.i ? 1 : 0.28, transition: "opacity .2s", cursor: "pointer" }}
                 onMouseEnter={() => setH(a.i)} onMouseLeave={() => setH(null)} />
             </g>
@@ -335,9 +632,9 @@ function Dumbbell() {
   return (
     <div>
       <svg viewBox={`0 0 ${W} 236`} className="cx-dumbbell" role="img" aria-label="Selisih skor kredit pada tiga pasangan kembar; yang gagal bayar selalu berskor lebih rendah.">
-        <circle cx={AX0} cy="22" r="6" fill="#1FB894" />
+        <circle cx={AX0} cy="22" r="6" fill="#15803D" />
         <text x={AX0 + 12} y="26" className="cx-svg-leg">Kembaran yang lunas</text>
-        <circle cx={AX0 + 155} cy="22" r="6" fill="#FF6B6B" />
+        <circle cx={AX0 + 155} cy="22" r="6" fill="#E11D48" />
         <text x={AX0 + 167} y="26" className="cx-svg-leg">Gagal bayar</text>
         <line x1={AX0} y1="198" x2={AX1} y2="198" className="cx-svg-axis" />
         {ticks.map((t) => (
@@ -354,18 +651,18 @@ function Dumbbell() {
               <rect x="0" y={y - 26} width={W} height="52" fill="transparent" />
               <text x={AX0 - 16} y={y - 3} className="cx-svg-prof" textAnchor="end" style={{ opacity: on || h === null ? 1 : 0.5 }}>{p.profile}</text>
               <text x={AX0 - 16} y={y + 12} className="cx-svg-profsub" textAnchor="end">{p.ratio} · {p.paid.id} vs {p.def.id}</text>
-              <line x1={xd} y1={y} x2={xp} y2={y} stroke={on ? "#7C8AA8" : "#333A52"} strokeWidth={on ? 3 : 2} />
-              <circle cx={xd} cy={y} r={on ? 9 : 8} fill="#FF6B6B" stroke="#fff" strokeWidth="2.5" />
-              <circle cx={xp} cy={y} r={on ? 9 : 8} fill="#1FB894" stroke="#fff" strokeWidth="2.5" />
-              <text x={xd - 14} y={y + 4} className="cx-svg-val" textAnchor="end" fill="#FF6B6B">{p.def.v.toFixed(2)}</text>
-              <text x={xp + 14} y={y + 4} className="cx-svg-val" textAnchor="start" fill="#1FB894">{p.paid.v.toFixed(2)}</text>
+              <line x1={xd} y1={y} x2={xp} y2={y} stroke={on ? "#6B7666" : "#DFE5D4"} strokeWidth={on ? 3 : 2} />
+              <circle cx={xd} cy={y} r={on ? 9 : 8} fill="#E11D48" stroke="#fff" strokeWidth="2.5" />
+              <circle cx={xp} cy={y} r={on ? 9 : 8} fill="#15803D" stroke="#fff" strokeWidth="2.5" />
+              <text x={xd - 14} y={y + 4} className="cx-svg-val" textAnchor="end" fill="#E11D48">{p.def.v.toFixed(2)}</text>
+              <text x={xp + 14} y={y + 4} className="cx-svg-val" textAnchor="start" fill="#15803D">{p.paid.v.toFixed(2)}</text>
               <text x={W - 6} y={y - 3} className="cx-svg-delta" textAnchor="end">{p.dScore} skor</text>
               <text x={W - 6} y={y + 12} className="cx-svg-deltasub" textAnchor="end">{p.dAge} usia</text>
             </g>
           );
         })}
       </svg>
-      <div className="cx-caption" style={{ borderLeftColor: active ? "#FF6B6B" : "#5B8DEF" }}>
+      <div className="cx-caption" style={{ borderLeftColor: active ? "#E11D48" : "#0F766E" }}>
         {active ? active.plain : "Titik merah (gagal bayar) selalu di kiri titik hijau (lunas), pinjaman sama, skor lebih rendah."}
       </div>
     </div>
@@ -428,12 +725,12 @@ const fmtK = (n: number) => (Math.abs(n) >= 1000 ? (n / 1000).toFixed(0) + "k" :
 type FKey = "INCOME" | "CREDIT" | "CI" | "AGE" | "EMP" | "EXT2" | "EXT3" | "ANN";
 type Prof = { id: string; book: "paid" | "default"; count: number; color: string } & Record<FKey, number>;
 const PROFILES: Prof[] = [
-  { id: "P0", book: "paid", count: 81860, color: "#5B8DEF", INCOME: 126754, CREDIT: 840601, CI: 6.92, AGE: 48.0, EMP: 7.1, EXT2: 0.519, EXT3: 0.580, ANN: 0.276 },
-  { id: "P1", book: "paid", count: 104585, color: "#4FD1C5", INCOME: 133511, CREDIT: 239976, CI: 2.04, AGE: 43.5, EMP: 5.6, EXT2: 0.496, EXT3: 0.526, ANN: 0.129 },
-  { id: "P2", book: "paid", count: 96241, color: "#9B5DE5", INCOME: 236969, CREDIT: 786131, CI: 3.52, AGE: 41.8, EMP: 6.3, EXT2: 0.558, EXT3: 0.473, ANN: 0.155 },
-  { id: "D0", book: "default", count: 8739, color: "#FF6B6B", INCOME: 136818, CREDIT: 256964, CI: 2.10, AGE: 38.4, EMP: 4.1, EXT2: 0.367, EXT3: 0.432, ANN: 0.132 },
-  { id: "D1", book: "default", count: 7572, color: "#F5A524", INCOME: 125972, CREDIT: 753129, CI: 6.38, AGE: 43.7, EMP: 5.4, EXT2: 0.408, EXT3: 0.528, ANN: 0.273 },
-  { id: "D2", book: "default", count: 8514, color: "#E15B9E", INCOME: 212967, CREDIT: 689377, CI: 3.48, AGE: 40.7, EMP: 5.3, EXT2: 0.460, EXT3: 0.322, ANN: 0.162 },
+  { id: "P0", book: "paid", count: 81860, color: C.P0, INCOME: 126754, CREDIT: 840601, CI: 6.92, AGE: 48.0, EMP: 7.1, EXT2: 0.519, EXT3: 0.580, ANN: 0.276 },
+  { id: "P1", book: "paid", count: 104585, color: C.P1, INCOME: 133511, CREDIT: 239976, CI: 2.04, AGE: 43.5, EMP: 5.6, EXT2: 0.496, EXT3: 0.526, ANN: 0.129 },
+  { id: "P2", book: "paid", count: 96241, color: C.P2, INCOME: 236969, CREDIT: 786131, CI: 3.52, AGE: 41.8, EMP: 6.3, EXT2: 0.558, EXT3: 0.473, ANN: 0.155 },
+  { id: "D0", book: "default", count: 8739, color: C.D0, INCOME: 136818, CREDIT: 256964, CI: 2.10, AGE: 38.4, EMP: 4.1, EXT2: 0.367, EXT3: 0.432, ANN: 0.132 },
+  { id: "D1", book: "default", count: 7572, color: C.D1, INCOME: 125972, CREDIT: 753129, CI: 6.38, AGE: 43.7, EMP: 5.4, EXT2: 0.408, EXT3: 0.528, ANN: 0.273 },
+  { id: "D2", book: "default", count: 8514, color: C.D2, INCOME: 212967, CREDIT: 689377, CI: 3.48, AGE: 40.7, EMP: 5.3, EXT2: 0.460, EXT3: 0.322, ANN: 0.162 },
 ];
 const FEATS: { key: FKey; label: string; short: string; kind: "money" | "x" | "yr" | "score" }[] = [
   { key: "EXT2", label: "Skor kredit eksternal", short: "Skor", kind: "score" },
@@ -450,45 +747,45 @@ const fRange = (k: FKey) => { const xs = PROFILES.map((p) => p[k]); return [Math
 const fmtFeat = (kind: string, v: number) => kind === "money" ? fmtK(v) : kind === "x" ? v.toFixed(1) + "×" : kind === "yr" ? v.toFixed(0) : v.toFixed(2);
 
 const MI_ITEMS = [
-  { label: "Skor eksternal · EXT_SOURCE_2", value: 0.0154, color: "#9B5DE5" },
-  { label: "Skor eksternal · EXT_SOURCE_3", value: 0.0127, color: "#9B5DE5" },
-  { label: "Jumlah anuitas", value: 0.0095, color: "#5B8DEF" },
-  { label: "Harga barang", value: 0.0065, color: "#5B8DEF" },
-  { label: "Jumlah kredit", value: 0.0063, color: "#5B8DEF" },
-  { label: "Masa kerja", value: 0.0051, color: "#5B8DEF" },
-  { label: "Umur", value: 0.0035, color: "#5B8DEF" },
-  { label: "Pendidikan", value: 0.0022, color: "#5B8DEF" },
-  { label: "Pekerjaan", value: 0.0021, color: "#5B8DEF" },
-  { label: "Jenis penghasilan", value: 0.0020, color: "#5B8DEF" },
+  { label: "Skor eksternal · EXT_SOURCE_2", value: 0.0154, color: "#4D7C0F" },
+  { label: "Skor eksternal · EXT_SOURCE_3", value: 0.0127, color: "#4D7C0F" },
+  { label: "Jumlah anuitas", value: 0.0095, color: "#0F766E" },
+  { label: "Harga barang", value: 0.0065, color: "#0F766E" },
+  { label: "Jumlah kredit", value: 0.0063, color: "#0F766E" },
+  { label: "Masa kerja", value: 0.0051, color: "#0F766E" },
+  { label: "Umur", value: 0.0035, color: "#0F766E" },
+  { label: "Pendidikan", value: 0.0022, color: "#0F766E" },
+  { label: "Pekerjaan", value: 0.0021, color: "#0F766E" },
+  { label: "Jenis penghasilan", value: 0.0020, color: "#0F766E" },
 ];
 const SOURCES: Seg[] = [
-  { label: "Formulir aplikasi", value: 86, color: "#5B8DEF" },
-  { label: "Aplikasi sebelumnya", value: 45, color: "#9B5DE5" },
-  { label: "Biro kredit", value: 21, color: "#4FD1C5" },
-  { label: "Kartu kredit", value: 12, color: "#F5A524" },
-  { label: "Angsuran", value: 11, color: "#E15B9E" },
-  { label: "POS", value: 10, color: "#8A90A6" },
+  { label: "Formulir aplikasi", value: 86, color: "#0F766E" },
+  { label: "Aplikasi sebelumnya", value: 45, color: "#4D7C0F" },
+  { label: "Biro kredit", value: 21, color: "#15803D" },
+  { label: "Kartu kredit", value: 12, color: "#D97706" },
+  { label: "Angsuran", value: 11, color: "#9F1239" },
+  { label: "POS", value: 10, color: "#9AA48F" },
 ];
 const LIFT_ITEMS = [
-  { label: "Dua skor rendah", value: 2.28, color: "#FF6B6B" },
-  { label: "Kerja baru + skor rendah", value: 2.12, color: "#FF6B6B" },
-  { label: "Pria + skor rendah", value: 2.03, color: "#FF6B6B" },
-  { label: "Skor rendah + barang menengah", value: 1.99, color: "#FF6B6B" },
-  { label: "Muda + skor rendah", value: 1.98, color: "#FF6B6B" },
-  { label: "Pinjaman menengah + skor rendah", value: 1.95, color: "#FF6B6B" },
+  { label: "Dua skor rendah", value: 2.28, color: "#E11D48" },
+  { label: "Kerja baru + skor rendah", value: 2.12, color: "#E11D48" },
+  { label: "Pria + skor rendah", value: 2.03, color: "#E11D48" },
+  { label: "Skor rendah + barang menengah", value: 1.99, color: "#E11D48" },
+  { label: "Muda + skor rendah", value: 1.98, color: "#E11D48" },
+  { label: "Pinjaman menengah + skor rendah", value: 1.95, color: "#E11D48" },
 ];
 const ANOM_ITEMS = [
-  { label: "P0 · Mapan", value: 15.0, color: "#5B8DEF" },
-  { label: "P2 · Prima", value: 12.63, color: "#5B8DEF" },
-  { label: "D1 · Terlampau terungkit", value: 10.59, color: "#FF6B6B" },
-  { label: "D2 · Menengah", value: 8.16, color: "#FF6B6B" },
-  { label: "P1 · Konservatif", value: 3.81, color: "#5B8DEF" },
-  { label: "D0 · Muda", value: 2.38, color: "#FF6B6B" },
+  { label: "P0 · Mapan", value: 15.0, color: "#0F766E" },
+  { label: "P2 · Prima", value: 12.63, color: "#0F766E" },
+  { label: "D1 · Terlampau terungkit", value: 10.59, color: "#E11D48" },
+  { label: "D2 · Menengah", value: 8.16, color: "#E11D48" },
+  { label: "P1 · Konservatif", value: 3.81, color: "#0F766E" },
+  { label: "D0 · Muda", value: 2.38, color: "#E11D48" },
 ];
 const AGREE_ITEMS = [
-  { label: "Terflag oleh 1 lensa", value: 65333, color: "#F5A524" },
-  { label: "Terflag oleh 2 lensa", value: 27133, color: "#F5A524" },
-  { label: "Terflag oleh ketiganya", value: 2989, color: "#FF6B6B" },
+  { label: "Terflag oleh 1 lensa", value: 65333, color: "#D97706" },
+  { label: "Terflag oleh 2 lensa", value: 27133, color: "#D97706" },
+  { label: "Terflag oleh ketiganya", value: 2989, color: "#E11D48" },
 ];
 const OUTLIER_METRICS = [
   { m: "Umur (th)", out: 48.7, norm: 43.9 },
@@ -497,9 +794,9 @@ const OUTLIER_METRICS = [
   { m: "Anuitas ÷ penghasilan", out: 0.27, norm: 0.18 },
 ];
 const VERDICT_SEG: Seg[] = [
-  { label: "Normal", value: 277389, color: "#5B8DEF" },
-  { label: "Bernilai tinggi, simpan", value: 26139, color: "#1FB894" },
-  { label: "Sinyal risiko", value: 3983, color: "#F5A524" },
+  { label: "Normal", value: 277389, color: "#0F766E" },
+  { label: "Bernilai tinggi, simpan", value: 26139, color: "#15803D" },
+  { label: "Sinyal risiko", value: 3983, color: "#D97706" },
 ];
 const ELBOW: Record<"default" | "paid", { k: number; inertia: number; sil: number }[]> = {
   default: [
@@ -532,7 +829,7 @@ const SRULES: SRule[] = [
   { sup: 0.0112, conf: 0.1523, lift: 1.89, cat: "risk", label: "Skor3 rendah + barang menengah → gagal bayar" },
   { sup: 0.012, conf: 0.1514, lift: 1.88, cat: "risk", label: "Kerja 1–3 th + skor3 rendah → gagal bayar" },
 ];
-const CATCOL: Record<string, string> = { risk: "#FF6B6B", safe: "#1FB894", behaviour: "#9B5DE5" };
+const CATCOL: Record<string, string> = { risk: "#E11D48", safe: "#15803D", behaviour: "#4D7C0F" };
 
 /* ============================ EXTRA CHARTS ============================ */
 
@@ -594,14 +891,14 @@ function ClusterMap() {
         ))}
         {PROFILES.map((p, i) => (
           <g key={p.id} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)} style={{ cursor: "pointer" }}>
-            <circle cx={px(p.CI)} cy={py(p.EXT2)} r={rOf(p.count)} fill={p.book === "default" ? "#FF6B6B" : "#1FB894"} opacity={h === null || h === i ? 0.9 : 0.45} stroke="#fff" strokeWidth="2" />
+            <circle cx={px(p.CI)} cy={py(p.EXT2)} r={rOf(p.count)} fill={p.book === "default" ? "#E11D48" : "#15803D"} opacity={h === null || h === i ? 0.9 : 0.45} stroke="#fff" strokeWidth="2" />
             <text x={px(p.CI)} y={py(p.EXT2) + 4} className="cx-cmap-id" textAnchor="middle">{p.id}</text>
           </g>
         ))}
         <text x={(X0 + X1) / 2} y={HT - 6} className="cx-svg-axlab" textAnchor="middle">KREDIT ÷ PENGHASILAN (LEVERAGE) →</text>
         <text x={16} y={(Y0 + Y1) / 2} className="cx-svg-axlab" textAnchor="middle" transform={`rotate(-90 16 ${(Y0 + Y1) / 2})`}>SKOR EKSTERNAL (AMAN)</text>
       </svg>
-      <div className="cx-caption" style={{ borderLeftColor: "#5B8DEF" }}>
+      <div className="cx-caption" style={{ borderLeftColor: "#0F766E" }}>
         {h === null ? "Gelembung = pusat keenam segmen (ukuran = jumlah nasabah). Garis putus menghubungkan tiap tipe berisiko dengan kembaran amannya, gelembung merah selalu lebih rendah (skor lebih lemah) pada leverage yang sama." : `${PROFILES[h].id} · ${PROFILES[h].book === "paid" ? "lunas" : "gagal bayar"} — ${fmt(PROFILES[h].count)} nasabah, skor ${PROFILES[h].EXT2.toFixed(2)}, leverage ${PROFILES[h].CI.toFixed(1)}×`}
       </div>
     </div>
@@ -627,15 +924,15 @@ function Radar() {
           <path key={g} d={"M " + FEATS.map((_, i) => `${cx + g * RAD * Math.cos(ang(i))},${cy + g * RAD * Math.sin(ang(i))}`).join(" L ") + " Z"} fill="none" stroke="#D8DFCE" strokeWidth="1" />
         ))}
         {FEATS.map((f, i) => <line key={f.key} x1={cx} y1={cy} x2={cx + RAD * Math.cos(ang(i))} y2={cy + RAD * Math.sin(ang(i))} stroke="#D8DFCE" strokeWidth="1" />)}
-        <path d={poly(def)} fill="#FF6B6B" fillOpacity="0.18" stroke="#FF6B6B" strokeWidth="2" />
-        <path d={poly(paid)} fill="#1FB894" fillOpacity="0.16" stroke="#1FB894" strokeWidth="2" />
+        <path d={poly(def)} fill="#E11D48" fillOpacity="0.18" stroke="#E11D48" strokeWidth="2" />
+        <path d={poly(paid)} fill="#15803D" fillOpacity="0.16" stroke="#15803D" strokeWidth="2" />
         {FEATS.map((f, i) => {
           const lx = cx + (RAD + 16) * Math.cos(ang(i)), ly = cy + (RAD + 16) * Math.sin(ang(i));
           return <text key={f.key} x={lx} y={ly + 3} className="cx-radar-lab" textAnchor={Math.abs(Math.cos(ang(i))) < 0.3 ? "middle" : Math.cos(ang(i)) > 0 ? "start" : "end"}>{f.short}</text>;
         })}
       </svg>
-      <div className="cx-caption" style={{ borderLeftColor: "#5B8DEF" }}>
-        <b style={{ color: "#1FB894" }}>{PROFILES[paid].id}</b> (lunas) vs <b style={{ color: "#FF6B6B" }}>{PROFILES[def].id}</b> (gagal bayar): bentuknya nyaris berimpit — selisih paling jelas ada di jari-jari skor kredit.
+      <div className="cx-caption" style={{ borderLeftColor: "#0F766E" }}>
+        <b style={{ color: "#15803D" }}>{PROFILES[paid].id}</b> (lunas) vs <b style={{ color: "#E11D48" }}>{PROFILES[def].id}</b> (gagal bayar): bentuknya nyaris berimpit — selisih paling jelas ada di jari-jari skor kredit.
       </div>
     </div>
   );
@@ -656,17 +953,17 @@ function ElbowChart() {
         <button className={`cx-toggle-btn ${tbl === "default" ? "cx-toggle-on" : ""}`} onClick={() => setTbl("default")}>Tabel gagal bayar</button>
       </div>
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-elbow" role="img" aria-label="Elbow dan silhouette menurut jumlah cluster.">
-        <line x1={px(3)} y1={Y0} x2={px(3)} y2={Y1} stroke="#5B8DEF" strokeWidth="1.4" strokeDasharray="4 4" opacity="0.7" />
-        <text x={px(3)} y={Y0 - 8} className="cx-svg-tick" textAnchor="middle" fill="#0F7A3D">K terpilih = 3</text>
-        <path d={"M " + d.map((r) => `${px(r.k)},${pyI(r.inertia)}`).join(" L ")} fill="none" stroke="#8A90A6" strokeWidth="2" />
-        <path d={"M " + d.map((r) => `${px(r.k)},${pyS(r.sil)}`).join(" L ")} fill="none" stroke="#9B5DE5" strokeWidth="2.5" />
-        {d.map((r) => <circle key={r.k} cx={px(r.k)} cy={pyS(r.sil)} r={r.k === 3 ? 5 : 3.2} fill={r.k === 3 ? "#9B5DE5" : "#6E5AA8"} />)}
+        <line x1={px(3)} y1={Y0} x2={px(3)} y2={Y1} stroke="#0F766E" strokeWidth="1.4" strokeDasharray="4 4" opacity="0.7" />
+        <text x={px(3)} y={Y0 - 8} className="cx-svg-tick" textAnchor="middle" fill="#15803D">K terpilih = 3</text>
+        <path d={"M " + d.map((r) => `${px(r.k)},${pyI(r.inertia)}`).join(" L ")} fill="none" stroke="#9AA48F" strokeWidth="2" />
+        <path d={"M " + d.map((r) => `${px(r.k)},${pyS(r.sil)}`).join(" L ")} fill="none" stroke="#4D7C0F" strokeWidth="2.5" />
+        {d.map((r) => <circle key={r.k} cx={px(r.k)} cy={pyS(r.sil)} r={r.k === 3 ? 5 : 3.2} fill={r.k === 3 ? "#4D7C0F" : "#65A30D"} />)}
         {d.map((r) => <text key={r.k} x={px(r.k)} y={Y1 + 18} className="cx-svg-tick" textAnchor="middle">{r.k}</text>)}
         <text x={(X0 + X1) / 2} y={HT - 4} className="cx-svg-axlab" textAnchor="middle">JUMLAH CLUSTER (K)</text>
-        <text x={X1 - 2} y={pyS(sr[1]) - 8} className="cx-svg-tick" textAnchor="end" fill="#7C5CBF">silhouette</text>
+        <text x={X1 - 2} y={pyS(sr[1]) - 8} className="cx-svg-tick" textAnchor="end" fill="#4D7C0F">silhouette</text>
         <text x={X1 - 2} y={pyI(inr[3]) + 14} className="cx-svg-tick" textAnchor="end">inertia</text>
       </svg>
-      <div className="cx-caption" style={{ borderLeftColor: "#9B5DE5" }}>Inertia terus turun (abu-abu); silhouette (ungu) tertinggi di antara opsi bermakna pada K = 3 — jadi tiap tabel dibagi jadi 3 tipe.</div>
+      <div className="cx-caption" style={{ borderLeftColor: C.P2 }}>Inertia terus turun (abu-abu); silhouette (olive) tertinggi di antara opsi bermakna pada K = 3 — jadi tiap tabel dibagi jadi 3 tipe.</div>
     </div>
   );
 }
@@ -697,7 +994,7 @@ function RuleScatter() {
         <span><i style={{ background: CATCOL.behaviour }} /> Perilaku</span>
         <span className="cx-note">gelembung = lift</span>
       </div>
-      <div className="cx-caption" style={{ borderLeftColor: a ? CATCOL[a.cat] : "#5B8DEF" }}>
+      <div className="cx-caption" style={{ borderLeftColor: a ? CATCOL[a.cat] : "#0F766E" }}>
         {a ? `${a.label} — support ${(a.sup * 100).toFixed(1)}%, confidence ${(a.conf * 100).toFixed(0)}%, lift ${a.lift.toFixed(2)}×` : "Arahkan cursor untuk melihat lebih detail"}
       </div>
     </div>
@@ -714,13 +1011,13 @@ function OutlierProfile() {
           <div key={m.m} className="cx-op-row" onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
             <div className="cx-op-m">{m.m}</div>
             <div className="cx-op-bars">
-              <div className="cx-op-bar"><div className="cx-op-track"><span className="cx-op-fill" style={{ width: `${(m.norm / mx) * 100}%`, background: "#5B8DEF", opacity: h === null || h === i ? 1 : 0.4 }} /></div><span className="cx-op-v">{m.norm}</span></div>
-              <div className="cx-op-bar"><div className="cx-op-track"><span className="cx-op-fill" style={{ width: `${(m.out / mx) * 100}%`, background: "#F5A524", opacity: h === null || h === i ? 1 : 0.4 }} /></div><span className="cx-op-v">{m.out}</span></div>
+              <div className="cx-op-bar"><div className="cx-op-track"><span className="cx-op-fill" style={{ width: `${(m.norm / mx) * 100}%`, background: "#0F766E", opacity: h === null || h === i ? 1 : 0.4 }} /></div><span className="cx-op-v">{m.norm}</span></div>
+              <div className="cx-op-bar"><div className="cx-op-track"><span className="cx-op-fill" style={{ width: `${(m.out / mx) * 100}%`, background: "#D97706", opacity: h === null || h === i ? 1 : 0.4 }} /></div><span className="cx-op-v">{m.out}</span></div>
             </div>
           </div>
         );
       })}
-      <div className="cx-op-leg"><span><i style={{ background: "#5B8DEF" }} /> Nasabah tipikal</span><span><i style={{ background: "#F5A524" }} /> Outlier DBSCAN</span></div>
+      <div className="cx-op-leg"><span><i style={{ background: "#0F766E" }} /> Nasabah tipikal</span><span><i style={{ background: "#D97706" }} /> Outlier DBSCAN</span></div>
     </div>
   );
 }
@@ -730,7 +1027,7 @@ function OutlierProfile() {
 type DPoint = { x: number; y: number; t: number; c: string; o: number };
 type DHist = { edges: number[]; repaid: number[]; default: number[] };
 type DData = { scatter: DPoint[]; hist: Record<string, DHist> };
-const CLUSTERCOL: Record<string, string> = { P0: "#5B8DEF", P1: "#4FD1C5", P2: "#9B5DE5", D0: "#FF6B6B", D1: "#F5A524", D2: "#E15B9E" };
+const CLUSTERCOL: Record<string, string> = { P0: C.P0, P1: C.P1, P2: C.P2, D0: C.D0, D1: C.D1, D2: C.D2 };
 const HISTFEATS: { key: string; label: string }[] = [
   { key: "EXT_SOURCE_2", label: "Skor kredit" },
   { key: "EXT_SOURCE_3", label: "Skor kredit (2)" },
@@ -801,18 +1098,18 @@ function PcaScatter() {
             isH = h === null || p.c === h;
           }
           return (
-            <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t === 1 ? "#FF6B6B" : "#1FB894") : (CLUSTERCOL[p.c] || "#8A90A6")} opacity={!visible ? "0" : isH ? "0.6" : "0.05"} />
+            <circle key={i} cx={px(p.x)} cy={py(p.y)} r="2.1" fill={mode === "outcome" ? (p.t === 1 ? "#E11D48" : "#15803D") : (CLUSTERCOL[p.c] || "#9AA48F")} opacity={!visible ? "0" : isH ? "0.6" : "0.05"} />
           );
         })}
         {pts.filter((p) => p.o).map((p, i) => (
-          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#F5A524" stroke="#fff" strokeWidth="1" opacity={h === null || h === "outlier" ? "1" : "0.05"} />
+          <circle key={`o${i}`} cx={px(p.x)} cy={py(p.y)} r="3.6" fill="#D97706" stroke="#fff" strokeWidth="1" opacity={h === null || h === "outlier" ? "1" : "0.05"} />
         ))}
       </svg>
       <div className="cx-scatter-legend">
         {mode === "outcome" ? (
           <>
-            <span onMouseEnter={() => setH("paid")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "paid" ? 1 : 0.4 }}><i style={{ background: "#1FB894" }} /> Lunas</span>
-            <span onMouseEnter={() => setH("def")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "def" ? 1 : 0.4 }}><i style={{ background: "#FF6B6B" }} /> Gagal bayar</span>
+            <span onMouseEnter={() => setH("paid")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "paid" ? 1 : 0.4 }}><i style={{ background: "#15803D" }} /> Lunas</span>
+            <span onMouseEnter={() => setH("def")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "def" ? 1 : 0.4 }}><i style={{ background: "#E11D48" }} /> Gagal bayar</span>
           </>
         ) : (
           Object.entries(CLUSTERCOL)
@@ -821,7 +1118,7 @@ function PcaScatter() {
             <span key={id} onMouseEnter={() => setH(id)} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === id ? 1 : 0.4 }}><i style={{ background: c }} /> {id}</span>
           ))
         )}
-        <span onMouseEnter={() => setH("outlier")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "outlier" ? 1 : 0.4 }}><i style={{ background: "#F5A524" }} /> Outlier DBSCAN</span>
+        <span onMouseEnter={() => setH("outlier")} onMouseLeave={() => setH(null)} style={{ cursor: "pointer", opacity: h === null || h === "outlier" ? 1 : 0.4 }}><i style={{ background: "#D97706" }} /> Outlier DBSCAN</span>
         <span className="cx-note">{pts.length} titik sampel</span>
       </div>
     </div>
@@ -851,10 +1148,10 @@ function HistExplorer() {
         ))}
       </div>
       <svg viewBox={`0 0 ${W} ${HT}`} className="cx-scatter" role="img" aria-label="Distribusi feature terpilih, lunas vs gagal bayar.">
-        <path d={area(h.repaid, maxR)} fill="#1FB894" fillOpacity="0.22" stroke="#1FB894" strokeWidth="2" />
-        <path d={area(h.default, maxD)} fill="#FF6B6B" fillOpacity="0.2" stroke="#FF6B6B" strokeWidth="2" />
+        <path d={area(h.repaid, maxR)} fill="#15803D" fillOpacity="0.22" stroke="#15803D" strokeWidth="2" />
+        <path d={area(h.default, maxD)} fill="#E11D48" fillOpacity="0.2" stroke="#E11D48" strokeWidth="2" />
       </svg>
-      <div className="cx-scatter-legend"><span><i style={{ background: "#1FB894" }} /> Lunas</span><span><i style={{ background: "#FF6B6B" }} /> Gagal bayar</span><span className="cx-note">tiap kurva diskala ke puncaknya sendiri</span></div>
+      <div className="cx-scatter-legend"><span><i style={{ background: "#15803D" }} /> Lunas</span><span><i style={{ background: "#E11D48" }} /> Gagal bayar</span><span className="cx-note">tiap kurva diskala ke puncaknya sendiri</span></div>
       <p className="cx-subtle">Bentuk asli dari seluruh 307.511 kredit. Geser antar-feature pada skor kredit, kurva gagal bayar jelas bergeser ke kiri.</p>
     </div>
   );
@@ -864,8 +1161,8 @@ function HistExplorer() {
 
 function Overview() {
   const outcome: Seg[] = [
-    { label: "Repaid", value: BOOK.repaid, color: "#1FB894" },
-    { label: "Defaulted", value: BOOK.defaulters, color: "#FF6B6B" },
+    { label: "Repaid", value: BOOK.repaid, color: "#15803D" },
+    { label: "Defaulted", value: BOOK.defaulters, color: "#E11D48" },
   ];
   return (
     <>
@@ -954,8 +1251,8 @@ function About() {
             <p className="cx-lead" style={{ maxWidth: "none" }}>
               <b>Home Credit</b> adalah penyedia kredit untuk nasabah dengan riwayat kredit tipis atau tanpa riwayat sama sekali.
               Tujuan dataset ini adalah memprediksi <b>kemampuan bayar</b> nasabah. Label target berada di tabel <code>application_train</code>:
-              {" "}<b style={{ color: "#FF6B6B" }}>TARGET = 1</b> berarti nasabah gagal bayar (telat lebih dari X hari pada minimal satu dari Y angsuran pertama),
-              sedangkan <b style={{ color: "#1FB894" }}>TARGET = 0</b> berarti nasabah membayar normal.
+              {" "}<b style={{ color: "#E11D48" }}>TARGET = 1</b> berarti nasabah gagal bayar (telat lebih dari X hari pada minimal satu dari Y angsuran pertama),
+              sedangkan <b style={{ color: "#15803D" }}>TARGET = 0</b> berarti nasabah membayar normal.
             </p>
             <p className="cx-subtle" style={{ marginTop: "12px" }}>
               Dataset terdiri dari <b>8 file</b> yang saling terhubung secara relasional: satu tabel inti ditambah beberapa tabel riwayat pendukung.
@@ -1008,7 +1305,7 @@ function About() {
           <div className="cx-card">
             <div className="cx-card-head"><span className="cx-card-title">Diagram Skema Relasi</span><span className="cx-note">arahkan kursor ke node/garis</span></div>
             <RelationDiagram hoverKey={hoverKey} onHover={setHoverKey} />
-            <div className="cx-caption" style={{ borderLeftColor: hoverKey ? KEYCOLOR[hoverKey] : "#16A34A" }}>
+            <div className="cx-caption" style={{ borderLeftColor: hoverKey ? KEYCOLOR[hoverKey] : "#15803D" }}>
               {hoverKey ? <><b>{hoverKey}</b> — {RELATION_KEYS.find((k) => k.key === hoverKey)?.desc}</> : "Tiga kunci menghubungkan tujuh tabel: hover node atau garis untuk menelusuri jalur relasinya."}
             </div>
           </div>
@@ -1088,35 +1385,204 @@ function About() {
   );
 }
 
+function CleaningAudit() {
+  const [sel, setSel] = useState(CLEANING_STEPS[1].id);
+  const s = CLEANING_STEPS.find((x) => x.id === sel)!;
+  return (
+    <div>
+      <div className="cx-fpills">
+        {CLEANING_STEPS.map((x) => (
+          <button key={x.id} className={`cx-fpill ${x.id === sel ? "cx-fpill-on" : ""}`} onClick={() => setSel(x.id)}>{x.title}</button>
+        ))}
+      </div>
+      <div className="cx-auditbox">
+        <div className="cx-auditmetric">
+          <span className="cx-auditnum">{s.metric}</span>
+          <span className="cx-auditunit">{s.unit}</span>
+        </div>
+        <div className="cx-auditbody">
+          <p className="cx-auditdetail">{s.detail}</p>
+          <p className="cx-auditwhy"><b>Kenapa begitu:</b> {s.why}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FeatureSelectionTable() {
+  const [h, setH] = useState<string | null>(null);
+  return (
+    <div>
+      <div className="cx-tablewrap">
+        <table className="cx-table cx-table-compact">
+          <thead><tr><th>Metode</th><th>Parameter</th><th>Dibuang</th><th>Sisa</th></tr></thead>
+          <tbody>
+            {FS_METHODS.map((m) => (
+              <tr key={m.n} onMouseEnter={() => setH(m.n)} onMouseLeave={() => setH(null)}
+                style={{ background: h === m.n ? "var(--card2)" : undefined, cursor: "default" }}>
+                <td>
+                  <b>{m.n}. {m.name}</b>
+                  <span className={`cx-tag ${m.unsup ? "cx-tag-info" : "cx-tag-warn"}`}>{m.unsup ? "unsupervised" : "ranking saja"}</span>
+                </td>
+                <td className="cx-mono">{m.param}</td>
+                <td style={{ color: m.drop === "0" ? "var(--dim)" : "var(--risk)", fontWeight: 700 }}>{m.drop}</td>
+                <td>{m.keep}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="cx-caption" style={{ borderLeftColor: h ? C.info : C.safe }}>
+        {h ? FS_METHODS.find((m) => m.n === h)!.note
+           : "Tiga filter pertama unsupervised (tak melihat TARGET) supaya seleksi tidak bocor dari label; Mutual Information hanya dipakai untuk mengurutkan kepentingan, bukan membuang fitur."}
+      </div>
+    </div>
+  );
+}
+
+function TransformList() {
+  const [h, setH] = useState<number | null>(null);
+  const tagCol: Record<string, string> = { Encoding: C.info, "Feature Engineering": C.P2, Output: C.safe };
+  return (
+    <ul className="cx-translist">
+      {TRANSFORM_STEPS.map((t, i) => (
+        <li key={t.title} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
+          <div className="cx-transhead">
+            <span className="cx-transtitle">{t.title}</span>
+            <span className="cx-tag" style={{ color: tagCol[t.tag], borderColor: tagCol[t.tag] }}>{t.tag}</span>
+          </div>
+          <p className="cx-transdetail" style={{ opacity: h === i ? 1 : 0.72 }}>{t.detail}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Phase1() {
   const outcome: Seg[] = [
-    { label: "Repaid", value: BOOK.repaid, color: "#1FB894" },
-    { label: "Defaulted", value: BOOK.defaulters, color: "#FF6B6B" },
+    { label: "Repaid", value: BOOK.repaid, color: C.safe },
+    { label: "Defaulted", value: BOOK.defaulters, color: C.risk },
   ];
   return (
     <>
       <KpiRow items={KPIS.phase1} />
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Kualitas Data & Penanganannya</span><span className="cx-note">pilih langkah · tiap keputusan dijustifikasi</span></div>
+        <CleaningAudit />
+      </div>
+
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
-          <div className="cx-card-head"><span className="cx-card-title">Dari 680 kolom jadi 185</span></div>
+          <div className="cx-card-head"><span className="cx-card-title">Dari 680 kolom jadi 185</span><span className="cx-note">4 metode berurutan</span></div>
           <FeatureFunnel />
         </div>
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Lunas vs gagal bayar</span><span className="cx-note">ketimpangan kelas</span></div>
           <Donut segments={outcome} center="8,1%" sub="gagal bayar" />
+          <p className="cx-subtle">Kelas <b>sangat timpang (8,1% : 91,9%)</b>. Ini yang membuat <code>min_support</code> Apriori harus rendah dan aturan proteksi tak bisa dinilai lewat lift (Fase 3).</p>
         </div>
       </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Metode Feature Selection</span><span className="cx-note">arahkan kursor ke tiap baris</span></div>
+        <FeatureSelectionTable />
+      </div>
+
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
-          <div className="cx-card-head"><span className="cx-card-title">Asal 185 feature</span></div>
-          <Donut segments={SOURCES} center="185" sub="feature disimpan" />
+          <div className="cx-card-head"><span className="cx-card-title">Encoding & Transformasi</span><span className="cx-note">menuju dua pipeline</span></div>
+          <TransformList />
         </div>
         <div className="cx-card">
-          <div className="cx-card-head"><span className="cx-card-title">Apa yang memprediksi gagal bayar</span><span className="cx-note">mutual information</span></div>
-          <HBars items={MI_ITEMS} max={0.0154} fmtVal={(v) => v.toFixed(4)} />
+          <div className="cx-card-head"><span className="cx-card-title">Asal 185 feature</span><span className="cx-note">per tabel sumber</span></div>
+          <Donut segments={SOURCES} center="185" sub="feature disimpan" />
         </div>
       </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Apa yang memprediksi gagal bayar</span><span className="cx-note">mutual information · ranking</span></div>
+        <HBars items={MI_ITEMS} max={0.0154} fmtVal={(v) => v.toFixed(4)} />
+        <p className="cx-subtle">Dua <b>skor kredit eksternal</b> memimpin dengan selisih jelas dari fitur berikutnya — temuan ini yang nanti muncul lagi sebagai pembeda utama di Fase 2 dan pemicu dominan di Fase 3.</p>
+      </div>
     </>
+  );
+}
+
+function AlgoPanel() {
+  const [sel, setSel] = useState(ALGOS[0].id);
+  const a = ALGOS.find((x) => x.id === sel)!;
+  return (
+    <div>
+      <div className="cx-algotabs">
+        {ALGOS.map((x) => (
+          <button key={x.id} className={`cx-algotab ${x.id === sel ? "cx-algotab-on" : ""}`} onClick={() => setSel(x.id)}
+            style={x.id === sel ? { borderColor: x.color, color: x.color } : undefined}>
+            <span className="cx-algodot" style={{ background: x.color }} />
+            <span>
+              <b>{x.name}</b>
+              <em>{x.kind}</em>
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className="cx-algobody">
+        <p className="cx-algoscope"><b>Ruang lingkup:</b> {a.scope}</p>
+        <ul className="cx-paramlist">
+          {a.params.map((p) => (
+            <li key={p.k}>
+              <div className="cx-paramhead"><span className="cx-paramk">{p.k}</span><span className="cx-paramv">{p.v}</span></div>
+              <p className="cx-paramwhy">{p.why}</p>
+            </li>
+          ))}
+        </ul>
+        <div className="cx-algoresult" style={{ borderLeftColor: a.color }}>
+          <span className="cx-note">Hasil</span>
+          <b>{a.result}</b>
+          <p>{a.interpret}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SegFeatureSelect() {
+  const max = Math.max(...ZERO_INFLATION.map((z) => z.n));
+  return (
+    <div>
+      <p className="cx-lead" style={{ maxWidth: "none", fontSize: "13px" }}>
+        185 fitur Fase 1 dipilih untuk <b>prediksi risiko</b>, bukan segmentasi. Pemeriksaan <i>zero-inflation</i> menunjukkan
+        kenapa mereka tak bisa dipakai langsung untuk clustering berbasis jarak:
+      </p>
+      <ul className="cx-hbars" style={{ marginTop: "14px" }}>
+        {ZERO_INFLATION.map((z) => (
+          <li key={z.thr}>
+            <div className="cx-hb-head"><span>Fitur dengan nilai 0 {z.thr}</span><span className="cx-hb-val">{z.n} / 185</span></div>
+            <div className="cx-track"><span className="cx-fill" style={{ width: `${(z.n / max) * 100}%`, background: C.warn }} /></div>
+          </li>
+        ))}
+      </ul>
+      <p className="cx-subtle">
+        Nilai 0 ini <b>benar secara semantik</b> (&ldquo;tidak ada riwayat&rdquo;), bukan data rusak — tapi jarak Euclidean jadi
+        didominasi segelintir fitur padat. Maka Fase 2 menyeleksi ulang subset padat &amp; interpretable:
+      </p>
+      <ul className="cx-critlist">
+        {SEG_FS.map((f, i) => (
+          <li key={f.rule}>
+            <span className="cx-critnum">{i + 1}</span>
+            <div>
+              <b>{f.rule}</b> — <span className="cx-mono">{f.detail}</span>
+              <p>{f.why}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="cx-caption" style={{ borderLeftColor: C.safe }}>
+        18 kandidat lolos Density; correlation pruning membuang <span className="cx-mono">AMT_GOODS_PRICE</span> (≈ <span className="cx-mono">AMT_CREDIT</span>)
+        dan <span className="cx-mono">CREDIT_TERM</span> → <b>17 fitur final</b> untuk segmentasi.
+      </div>
+    </div>
   );
 }
 
@@ -1144,10 +1610,20 @@ function PersonaDonuts() {
 }
 
 function Phase2() {
-  const personas: Seg[] = [...PAID_PERSONAS, ...DEF_PERSONAS].map((p) => ({ label: `${p.id} · ${p.name}`, value: p.count, color: p.color }));
   return (
     <>
       <KpiRow items={KPIS.phase2} />
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Tiga Algoritma Clustering</span><span className="cx-note">pilih algoritma · parameter &amp; justifikasinya</span></div>
+        <AlgoPanel />
+      </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Feature Selection untuk Segmentasi</span><span className="cx-note">kenapa 185 fitur Fase 1 tidak dipakai langsung</span></div>
+        <SegFeatureSelect />
+      </div>
+
       <div className="cx-card">
         <div className="cx-card-head"><span className="cx-card-title">Selisih skor kredit</span><span className="cx-note">tiga pasangan kembar · hover</span></div>
         <Dumbbell />
@@ -1185,10 +1661,10 @@ function Phase2() {
       <div className="cx-grid cx-grid-2-3">
         <PersonaDonuts />
         <div className="cx-card">
-          <div className="cx-card-head"><span className="cx-card-title" style={{ color: "#1FB894" }}>Tipe lunas</span><span className="cx-card-title" style={{ color: "#FF6B6B" }}>Tipe gagal bayar</span></div>
+          <div className="cx-card-head"><span className="cx-card-title" style={{ color: "#15803D" }}>Tipe lunas</span><span className="cx-card-title" style={{ color: "#E11D48" }}>Tipe gagal bayar</span></div>
           <div className="cx-personas-2">
-            <PersonaList personas={PAID_PERSONAS} color="#1FB894" of="pelunas" />
-            <PersonaList personas={DEF_PERSONAS} color="#FF6B6B" of="gagal bayar" />
+            <PersonaList personas={PAID_PERSONAS} color="#15803D" of="pelunas" />
+            <PersonaList personas={DEF_PERSONAS} color="#E11D48" of="gagal bayar" />
           </div>
         </div>
       </div>
@@ -1196,13 +1672,134 @@ function Phase2() {
   );
 }
 
+function MetricExplainer() {
+  const [sel, setSel] = useState(0);
+  const m = METRICS_DEF[sel];
+  return (
+    <div>
+      <div className="cx-metricrow">
+        {METRICS_DEF.map((x, i) => (
+          <button key={x.name} className={`cx-metricbtn ${i === sel ? "cx-metricbtn-on" : ""}`} onClick={() => setSel(i)}
+            style={i === sel ? { borderColor: x.color, color: x.color } : undefined}>
+            <b>{x.name}</b>
+            <em>{x.reads}</em>
+          </button>
+        ))}
+      </div>
+      <div className="cx-metricbody" style={{ borderLeftColor: m.color }}>
+        <div className="cx-metricformula"><span className="cx-note">Rumus</span><code>{m.formula}</code></div>
+        <p>{m.example}</p>
+      </div>
+      <p className="cx-subtle">
+        <b>Lift &gt; 1</b> = asosiasi positif · <b>= 1</b> independen · <b>&lt; 1</b> saling menghindar.
+        Lift jadi metrik keputusan utama karena membuang bias base-rate.
+      </p>
+    </div>
+  );
+}
+
+function DiscretizationTable() {
+  const [h, setH] = useState<string | null>(null);
+  const active = BINS.find((b) => b.attr === h);
+  return (
+    <div>
+      <div className="cx-tablewrap">
+        <table className="cx-table cx-table-compact">
+          <thead><tr><th>Atribut</th><th>Kategori</th><th>Batas / aturan</th></tr></thead>
+          <tbody>
+            {BINS.map((b) => (
+              <tr key={b.attr} onMouseEnter={() => setH(b.attr)} onMouseLeave={() => setH(null)}
+                style={{ background: h === b.attr ? "var(--card2)" : undefined }}>
+                <td>
+                  <code>{b.attr}</code>
+                  <span className="cx-tag" style={{ color: BASIS_COL[b.basis], borderColor: BASIS_COL[b.basis] }}>{b.basis}</span>
+                </td>
+                <td style={{ fontWeight: 400, color: "var(--muted)", whiteSpace: "normal" }}>{b.cats}</td>
+                <td className="cx-mono">{b.rule}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="cx-caption" style={{ borderLeftColor: active ? BASIS_COL[active.basis] : C.info }}>
+        {active ? <><b>{active.attr}</b> — {active.why}</>
+          : <><b>Kenapa quintile/tertile, bukan ambang tetap?</b> Dua alasan terukur: (1) tiap kategori otomatis berisi ~20% atau ~33% populasi, jadi tak ada kategori terlalu langka untuk lolos <span className="cx-mono">min_support</span>; (2) batas ditentukan distribusi nyata, bukan angka arbitrer. <span className="cx-mono">DEBT_BURDEN</span> justru pakai ambang domain karena debt-service ratio punya makna baku.</>}
+      </div>
+    </div>
+  );
+}
+
+function AprioriFunnel() {
+  const [h, setH] = useState<number | null>(null);
+  return (
+    <div className="cx-methods">
+      {APRIORI_FUNNEL.map((f, i) => (
+        <div key={f.stage} className="cx-mrow" onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
+          <div className="cx-fhead">
+            <span>{f.stage}</span>
+            <span className="cx-mnum">{fmt(f.n)}</span>
+          </div>
+          <div className="cx-track">
+            <span className="cx-fill" style={{ width: `${Math.max(1.5, (f.n / f.of) * 100)}%`, background: i === APRIORI_FUNNEL.length - 1 ? C.safe : C.info, opacity: h === null || h === i ? 1 : 0.4 }} />
+          </div>
+          <div className="cx-fnote" style={{ opacity: h === i ? 1 : 0.65 }}>
+            <span className="cx-mono" style={{ color: "var(--warn)" }}>{f.param}</span> — {f.note}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AprioriParams() {
+  const [open, setOpen] = useState<string | null>(APRIORI_PARAMS[0].k);
+  return (
+    <div className="cx-accordion">
+      {APRIORI_PARAMS.map((p) => {
+        const isOpen = open === p.k;
+        return (
+          <div key={p.k} className={`cx-accitem ${isOpen ? "cx-accitem-on" : ""}`}>
+            <button className="cx-acchead" onClick={() => setOpen(isOpen ? null : p.k)} aria-expanded={isOpen}>
+              <span><span className="cx-mono" style={{ color: "var(--info)" }}>{p.k}</span> = <b>{p.v}</b></span>
+              <span className="cx-accchev" style={{ transform: isOpen ? "rotate(180deg)" : "none" }}><Icon name="chevronDown" /></span>
+            </button>
+            {isOpen && <p className="cx-accbody">{p.why}</p>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Phase3() {
   return (
     <>
       <KpiRow items={KPIS.phase3} />
+
       <div className="cx-grid cx-grid-2">
-        <RuleColumn title="Apa yang memicu gagal bayar" hint="peluang gagal bayar" rules={RISK_RULES} color="#FF6B6B" />
-        <RuleColumn title="Apa yang menandakan aman" hint="peluang lunas" rules={SAFE_RULES} color="#1FB894" />
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Tiga Metrik Inti</span><span className="cx-note">klik untuk penjelasan</span></div>
+          <MetricExplainer />
+        </div>
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Dari 81.710 aturan jadi 18</span><span className="cx-note">hover tiap tahap</span></div>
+          <AprioriFunnel />
+        </div>
+      </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Diskretisasi Variabel Kontinu</span><span className="cx-note">hover tiap atribut untuk rasionalnya</span></div>
+        <DiscretizationTable />
+      </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Parameter Apriori &amp; Justifikasinya</span><span className="cx-note">klik untuk buka</span></div>
+        <AprioriParams />
+      </div>
+
+      <div className="cx-grid cx-grid-2">
+        <RuleColumn title="Apa yang memicu gagal bayar" hint="peluang gagal bayar" rules={RISK_RULES} color={C.risk} />
+        <RuleColumn title="Apa yang menandakan aman" hint="peluang lunas" rules={SAFE_RULES} color={C.safe} />
       </div>
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
@@ -1212,9 +1809,120 @@ function Phase3() {
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Aturan risiko terkuat menurut lift</span><span className="cx-note">× di atas rata-rata</span></div>
           <HBars items={LIFT_ITEMS} max={2.28} fmtVal={(v) => v.toFixed(2) + "×"} />
+          <p className="cx-subtle">Tak satu pun atribut tunggal cukup — risiko melonjak hanya saat <b>skor rendah berpasangan</b> dengan faktor kerentanan. Ini membenarkan credit scoring berbasis <b>interaksi</b>, bukan ambang per-atribut.</p>
         </div>
       </div>
     </>
+  );
+}
+
+function SkewEvidence() {
+  const [h, setH] = useState<number | null>(null);
+  const max = Math.max(...IQR_BY_FEATURE.map((f) => f.iqr));
+  return (
+    <div>
+      <ul className="cx-hbars">
+        {IQR_BY_FEATURE.map((f, i) => (
+          <li key={f.feat} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
+            <div className="cx-hb-head">
+              <span className="cx-mono" style={{ fontSize: "11.5px" }}>{f.feat}</span>
+              <span className="cx-hb-val">{f.iqr.toFixed(2)}%</span>
+            </div>
+            <div className="cx-track">
+              <span className="cx-fill" style={{ width: `${max ? (f.iqr / max) * 100 : 0}%`, background: C.warn, opacity: h === null || h === i ? 1 : 0.4 }} />
+              {f.z !== null && <span className="cx-fill cx-fill-over" style={{ width: `${max ? (f.z / max) * 100 : 0}%`, background: C.info }} />}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="cx-scatter-legend" style={{ marginTop: "12px" }}>
+        <span><i style={{ background: C.warn }} /> Terflag IQR</span>
+        <span><i style={{ background: C.info }} /> Terflag Z-score</span>
+      </div>
+      <div className="cx-caption" style={{ borderLeftColor: C.warn }}>
+        <b>Bukti empiris kenapa dua metode univariate diperlukan.</b> Pada fitur ber-skew ekstrem,
+        Z-score menandai jauh lebih sedikit outlier daripada IQR — persis konsekuensi asumsi normalitas yang gugur:
+        <span className="cx-mono"> BURO_..._DEBT_MEAN</span> (skew <b>22,34</b>) → IQR 10,69% vs Z 1,10%;
+        <span className="cx-mono"> INST_PAYMENT_DELAY_MEAN</span> (skew <b>24,10</b>) → 5,67% vs 0,93%.
+        Mean &amp; std tertarik ekor, jadi Z-score <b>under-flag</b>.
+      </div>
+    </div>
+  );
+}
+
+function DbscanConvergence() {
+  return (
+    <div>
+      <p className="cx-lead" style={{ maxWidth: "none", fontSize: "13px" }}>
+        DBSCAN (Fase 2, density-based, ruang 17-fitur ter-PCA) dan metode statistik Fase 4 (11 fitur mentah)
+        adalah pendekatan <b>independen</b>. Dari <b>199 outlier DBSCAN</b>:
+      </p>
+      <ul className="cx-hbars" style={{ marginTop: "14px" }}>
+        {DBSCAN_XREF.map((x) => (
+          <li key={x.label}>
+            <div className="cx-hb-head"><span>{x.label}</span><span className="cx-hb-val">{x.pct}% <span style={{ color: "var(--dim)", fontWeight: 400 }}>({x.n})</span></span></div>
+            <div className="cx-track"><span className="cx-fill" style={{ width: `${x.pct}%`, background: x.color }} /></div>
+          </li>
+        ))}
+      </ul>
+      <div className="cx-caption" style={{ borderLeftColor: C.safe }}>
+        <b>Konvergensi kuat.</b> 93,0% outlier DBSCAN dikonfirmasi ≥2 metode statistik yang sama sekali berbeda asumsinya —
+        keduanya menunjuk record menyimpang yang sama dari sudut berbeda. Tingkat Isolation Forest 15,6% adalah
+        <b> 15,6× lipat</b> tingkat populasi (1,0%).
+      </div>
+    </div>
+  );
+}
+
+function AnomalyClasses() {
+  const [sel, setSel] = useState(ANOM_CLASSES[0].id);
+  const a = ANOM_CLASSES.find((x) => x.id === sel)!;
+  return (
+    <div>
+      <div className="cx-classrow">
+        {ANOM_CLASSES.map((x) => (
+          <button key={x.id} className={`cx-classbtn ${x.id === sel ? "cx-classbtn-on" : ""}`} onClick={() => setSel(x.id)}
+            style={x.id === sel ? { borderColor: x.color } : undefined}>
+            <span className="cx-classname" style={{ color: x.color }}>{x.name}</span>
+            <span className="cx-classcount">{fmt(x.count)}</span>
+            <span className="cx-classrate">{x.rate === null ? "—" : `default ${x.rate.toFixed(2).replace(".", ",")}%`}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="cx-ratebar">
+        <div className="cx-ratebar-track">
+          {ANOM_CLASSES.filter((x) => x.rate !== null).map((x) => (
+            <div key={x.id} className="cx-ratebar-mark" style={{ left: `${((x.rate as number) / 12) * 100}%`, background: x.color }} title={x.name}>
+              <span>{(x.rate as number).toFixed(2).replace(".", ",")}%</span>
+            </div>
+          ))}
+          <div className="cx-ratebar-base" style={{ left: `${(8.07 / 12) * 100}%` }}><span>base 8,07%</span></div>
+        </div>
+        <p className="cx-subtle" style={{ marginTop: "26px" }}>
+          <b>Validasi lewat default rate.</b> RISK_SIGNAL (8,69%) berada di atas base rate, RARE_LEGITIMATE (5,20%) di bawahnya.
+          Urutan <b>RISK &gt; base &gt; RARE</b> inilah bukti bahwa klasifikasinya benar-benar memisahkan risiko, bukan sekadar melabeli.
+        </p>
+      </div>
+
+      <div className="cx-classdetail" style={{ borderLeftColor: a.color }}>
+        <div className="cx-classmeta">
+          <div><span className="cx-note">Aturan</span><p className="cx-mono">{a.rule}</p></div>
+          <div><span className="cx-note">Median kredit/income</span><p><b>{a.ci}</b></p></div>
+          <div><span className="cx-note">Median EXT_2</span><p><b>{a.ext}</b></p></div>
+        </div>
+        <p className="cx-classverdict">{a.verdict}</p>
+        <div className="cx-classexample"><span className="cx-note">Bukti record konkret</span><p>{a.example}</p></div>
+      </div>
+
+      {a.id === "err" && (
+        <div className="cx-checkgrid">
+          {INTEGRITY_CHECKS.map((c) => (
+            <div key={c} className="cx-checkitem"><span className="cx-checkmark" style={{ color: C.safe }}><Icon name="check" /></span>{c}<b>0</b></div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1224,34 +1932,190 @@ function Phase4() {
       <KpiRow items={KPIS.phase4} />
       <div className="cx-card">
         <div className="cx-card-head"><span className="cx-card-title">Tiga Lensa Anomaly Detection</span><span className="cx-note">arahkan kursor ke tiap lensa</span></div>
-        <p className="cx-lead" style={{ marginBottom: "22px", fontSize: "13.5px" }}>Istilah <b>"Lensa"</b> di sini mengacu pada <b>tiga algoritma pendeteksi anomali (outlier)</b> yang berbeda. Karena tidak ada satu algoritma yang selalu benar, kami menggunakan pendekatan berlapis (ensemble) mulai dari statistik matematis dasar (IQR & Z-Score) hingga algoritma AI modern (Isolation Forest) untuk menyaring data.</p>
+        <p className="cx-lead" style={{ marginBottom: "22px", fontSize: "13.5px" }}>Istilah <b>&ldquo;Lensa&rdquo;</b> di sini mengacu pada <b>tiga algoritma pendeteksi anomali (outlier)</b> yang berbeda. Karena tidak ada satu algoritma yang selalu benar, kami menggunakan pendekatan berlapis (ensemble) mulai dari statistik matematis dasar (IQR &amp; Z-Score) hingga algoritma AI modern (Isolation Forest) untuk menyaring data.</p>
         <MethodFunnel />
         <p className="cx-subtle" style={{ marginTop: "20px" }}>Di mana minimal dua algoritma di atas sepakat terhadap baris yang sama, kami mendapatkan <b>30.122</b> kredit yang kami jadikan target <i>flagging</i> dengan keyakinan tinggi.</p>
       </div>
+
+      <div className="cx-grid cx-grid-2">
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Kenapa IQR &amp; Z-score keduanya perlu</span><span className="cx-note">outlier per fitur</span></div>
+          <SkewEvidence />
+        </div>
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Cross-reference dengan DBSCAN Fase 2</span><span className="cx-note">validasi silang</span></div>
+          <DbscanConvergence />
+        </div>
+      </div>
+
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Berapa lensa yang sepakat</span><span className="cx-note">212.056 tanpa flag dikecualikan</span></div>
           <HBars items={AGREE_ITEMS} max={65333} fmtVal={fmt} />
+          <p className="cx-subtle">Hampir semua anomali Z-score dan Isolation Forest adalah <b>subset dari IQR</b> (masing-masing 100%). IQR = jaring terluas; metode lebih ketat menyaring di dalamnya.</p>
         </div>
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Di mana anomaly menumpuk</span><span className="cx-note">% keyakinan tinggi per segmen</span></div>
           <HBars items={ANOM_ITEMS} max={15} fmtVal={(v) => v.toFixed(1) + "%"} />
+          <p className="cx-subtle">Anomali menumpuk di persona <b>berpinjaman besar / leverage tinggi</b> (P0, P2, D1, D2) — bukan di persona pinjaman kecil, dan <b>tidak</b> lebih pekat di populasi gagal bayar (default 6,87% &lt; paid 10,05%). <b>Anomali statistik ≠ risiko default</b>: keduanya menangkap dimensi berbeda.</p>
         </div>
       </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Klasifikasi Tiap Anomali</span><span className="cx-note">data error · rare event · risk indicator</span></div>
+        <AnomalyClasses />
+      </div>
+
       <div className="cx-grid cx-grid-2">
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Outlier vs nasabah tipikal</span><span className="cx-note">outlier DBSCAN</span></div>
           <OutlierProfile />
           <p className="cx-subtle" style={{ marginTop: "14px", lineHeight: 1.55, fontSize: "12.5px" }}>
-            <b>Apa artinya?</b> Nasabah outlier (anomali) menunjukkan rasio utang yang sangat ekstrem. 
-            Nilai <b>Kredit ÷ Penghasilan</b> mereka mencapai 5.7× gaji (dibandingkan nasabah tipikal yang hanya 3.9×). 
-            Selain itu, <b>Anuitas ÷ Penghasilan</b> mereka adalah 0.27, yang berarti 27% dari total pendapatan mereka habis murni untuk membayar cicilan bulanan (berbanding 18% pada nasabah wajar). 
+            <b>Apa artinya?</b> Nasabah outlier (anomali) menunjukkan rasio utang yang sangat ekstrem.
+            Nilai <b>Kredit ÷ Penghasilan</b> mereka mencapai 5,7× gaji (dibandingkan nasabah tipikal yang hanya 3,9×).
+            Selain itu, <b>Anuitas ÷ Penghasilan</b> mereka adalah 0,27, yang berarti 27% dari total pendapatan mereka habis murni untuk membayar cicilan bulanan (berbanding 18% pada nasabah wajar).
             Rasio hutang yang terlalu mencekik inilah yang membuat algoritma menandai mereka sebagai sangat tidak wajar (risiko tinggi).
           </p>
         </div>
         <div className="cx-card">
           <div className="cx-card-head"><span className="cx-card-title">Vonisnya</span><span className="cx-note">tiap kredit diklasifikasi</span></div>
           <Donut segments={VERDICT_SEG} center="30.122" sub="diflag untuk review" />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function KnowledgePanel() {
+  const [open, setOpen] = useState<string>(KNOWLEDGE[0].id);
+  const [filter, setFilter] = useState<"all" | Knowledge["kind"]>("all");
+  const list = filter === "all" ? KNOWLEDGE : KNOWLEDGE.filter((k) => k.kind === filter);
+  return (
+    <div>
+      <div className="cx-toggle" style={{ marginBottom: "16px" }}>
+        <button className={`cx-toggle-btn ${filter === "all" ? "cx-toggle-on" : ""}`} onClick={() => setFilter("all")}>Semua ({KNOWLEDGE.length})</button>
+        {(Object.keys(KIND_META) as Knowledge["kind"][]).map((k) => (
+          <button key={k} className={`cx-toggle-btn ${filter === k ? "cx-toggle-on" : ""}`} onClick={() => setFilter(k)}
+            style={filter === k ? { background: KIND_META[k].color, borderColor: "transparent" } : undefined}>
+            {KIND_META[k].label} ({KNOWLEDGE.filter((x) => x.kind === k).length})
+          </button>
+        ))}
+      </div>
+
+      <div className="cx-klist">
+        {list.map((k, i) => {
+          const isOpen = open === k.id;
+          const meta = KIND_META[k.kind];
+          return (
+            <div key={k.id} className={`cx-kitem ${isOpen ? "cx-kitem-on" : ""}`} style={isOpen ? { borderColor: meta.color } : undefined}>
+              <button className="cx-khead" onClick={() => setOpen(isOpen ? "" : k.id)} aria-expanded={isOpen}>
+                <span className="cx-knum" style={{ background: isOpen ? meta.color : undefined, color: isOpen ? "#fff" : undefined }}>{i + 1}</span>
+                <span className="cx-ktexts">
+                  <span className="cx-ktag" style={{ color: meta.color }}>{meta.label}</span>
+                  <span className="cx-kheadline">{k.headline}</span>
+                </span>
+                <span className="cx-accchev" style={{ transform: isOpen ? "rotate(180deg)" : "none" }}><Icon name="chevronDown" /></span>
+              </button>
+
+              {isOpen && (
+                <div className="cx-kbody">
+                  <p className="cx-kclaim">{k.claim}</p>
+
+                  <div className="cx-kevidence">
+                    <span className="cx-note">Rantai bukti</span>
+                    <ul>
+                      {k.evidence.map((e, j) => (
+                        <li key={j}>
+                          <span className="cx-kphase" style={{ borderColor: meta.color, color: meta.color }}>{e.phase}</span>
+                          <span>{e.text}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="cx-kfoot">
+                    <div className="cx-kaction" style={{ borderLeftColor: meta.color }}>
+                      <span className="cx-note">Tindakan bisnis</span>
+                      <p>{k.action}</p>
+                    </div>
+                    <div className="cx-kvalue">
+                      <span className="cx-note">Kenapa ini bernilai</span>
+                      <p>{k.value}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Knowledge() {
+  return (
+    <>
+      <KpiRow items={KPIS.knowledge} />
+
+      <div className="cx-card cx-hero">
+        <span className="cx-eyebrow">Jawaban ringkas</span>
+        <p className="cx-heroline">
+          Yang membedakan nasabah gagal bayar dari yang lunas <strong>bukan seberapa besar mereka meminjam</strong> —
+          melainkan <strong>skor kredit eksternal yang lebih rendah</strong>, dan hanya ketika skor itu
+          <strong> berpasangan</strong> dengan faktor kerentanan kedua.
+        </p>
+        <p className="cx-herosub">
+          Temuan ini muncul secara independen di tiga fase yang memakai metode berbeda — mutual information (Fase 1),
+          kontras lintas-populasi (Fase 2), dan association rules (Fase 3) — sehingga saling memvalidasi, bukan artefak satu metode.
+        </p>
+      </div>
+
+      <div className="cx-card">
+        <div className="cx-card-head"><span className="cx-card-title">Tujuh Pengetahuan yang Ditemukan</span><span className="cx-note">klik untuk rantai bukti &amp; tindakannya</span></div>
+        <KnowledgePanel />
+      </div>
+
+      <div className="cx-grid cx-grid-2">
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Dari analisis ke keputusan</span><span className="cx-note">tiga jalur nasabah</span></div>
+          <ul className="cx-routelist">
+            <li>
+              <span className="cx-routedot" style={{ background: C.safe }} />
+              <div>
+                <b>Fast-track &amp; upsell</b>
+                <span className="cx-routenum">~38.000 nasabah · 97,7% lunas</span>
+                <p>Kedua skor eksternal tinggi. Percepat persetujuan, tawarkan produk premium, dan bebaskan kapasitas review manual.</p>
+              </div>
+            </li>
+            <li>
+              <span className="cx-routedot" style={{ background: C.warn }} />
+              <div>
+                <b>Jalur persetujuan khusus</b>
+                <span className="cx-routenum">26.139 nasabah · default 5,20%</span>
+                <p>RARE_LEGITIMATE — ekstrem pada angka tapi konsisten, dan lebih aman dari rata-rata. Jangan tolak otomatis hanya karena terlihat sebagai outlier.</p>
+              </div>
+            </li>
+            <li>
+              <span className="cx-routedot" style={{ background: C.risk }} />
+              <div>
+                <b>Manual underwriting review</b>
+                <span className="cx-routenum">3.983 nasabah · default 8,69%</span>
+                <p>RISK_SIGNAL — leverage ekstrem dan/atau kedua skor rendah. Verifikasi slip gaji, minta uang muka lebih besar, atau batasi plafon.</p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div className="cx-card">
+          <div className="cx-card-head"><span className="cx-card-title">Batasan yang kami akui</span><span className="cx-note">kejujuran metodologis</span></div>
+          <ul className="cx-limitlist">
+            <li><b>Silhouette rendah (≈0,09).</b> Data finansial berbentuk continuum, jadi batas antar-segmen memang kabur. Persona tetap berguna sebagai lensa, bukan sebagai kotak yang tegas.</li>
+            <li><b>DBSCAN dijalankan pada sampel 20k</b>, bukan seluruh populasi — jadi angka overlap dihitung atas 199 outlier itu saja. IQR, Z-score, dan Isolation Forest tetap dihitung pada seluruh 307.511 nasabah.</li>
+            <li><b>Nol DATA_ERROR bukan berarti tidak mencari.</b> Sebelas kondisi mustahil diuji eksplisit, termasuk konsistensi antar-kolom; semuanya nol karena Fase 1 sudah menuntaskannya.</li>
+            <li><b>Aturan proteksi tak bisa dinilai lewat lift.</b> Karena Repaid ≈ 92%, lift maksimum teoretisnya hanya ~1,09 — itu matematika, bukan kelemahan aturan.</li>
+            <li><b>Gender muncul sebagai penanda, bukan penyebab.</b> Aturan #13 dipakai sebagai flag tambahan saja; menjadikannya dasar keputusan kredit berisiko secara etis dan regulatif.</li>
+          </ul>
         </div>
       </div>
     </>
@@ -1287,13 +2151,13 @@ function Dictionary() {
           <div className="cx-card-head"><span className="cx-card-title">Daftar Lengkap 18 Aturan Asosiasi</span><span className="cx-note">Association Rules</span></div>
           <div className="cx-dict-list">
             
-            <h4 style={{ color: "#1FB894", margin: "0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Keamanan (Pasti Lunas)</h4>
+            <h4 style={{ color: "#15803D", margin: "0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Keamanan (Pasti Lunas)</h4>
             <div className="cx-dict-item"><b>1. Kedua skor (EXT2 & EXT3) tinggi → Lunas</b><p>Kombinasi paling sakti. Jika kedua biro kredit memberi skor tinggi, nasabah memiliki probabilitas pelunasan di atas 97%.</p></div>
             <div className="cx-dict-item"><b>2. Skor tinggi + Wilayah teratas → Lunas</b><p>Skor baik ditambah domisili di lingkungan elit/rating baik adalah garansi keamanan portofolio.</p></div>
             <div className="cx-dict-item"><b>3. Kerja 15+ tahun + Skor tinggi → Lunas</b><p>Kestabilan karier (di atas 15 tahun di satu tempat) memberikan bantalan ekonomi yang kebal goncangan.</p></div>
             <div className="cx-dict-item"><b>4. Skor tinggi + Pinjaman Revolving → Lunas</b><p>Nasabah unggul sangat pandai mengelola kartu kredit atau revolving loan tanpa menunggak.</p></div>
 
-            <h4 style={{ color: "#FF6B6B", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Risiko (Sinyal Gagal Bayar)</h4>
+            <h4 style={{ color: "#E11D48", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Risiko (Sinyal Gagal Bayar)</h4>
             <div className="cx-dict-item"><b>5. Kedua skor eksternal rendah → Gagal bayar</b><p>Aturan terkuat (Lift 2.28×). Peluang macet meroket lebih dari dua kali lipat rata-rata portofolio.</p></div>
             <div className="cx-dict-item"><b>6. Kerja 1–3 tahun + Skor rendah → Gagal bayar</b><p>Tenaga kerja baru tanpa tabungan darurat, ditambah histori kredit buruk, berakibat fatal pada pelunasan.</p></div>
             <div className="cx-dict-item"><b>7. Pria + Skor rendah → Gagal bayar</b><p>Data demografis historis membuktikan pria dengan skor rendah secara konsisten lebih sering menunggak dibanding demografi lain.</p></div>
@@ -1302,7 +2166,7 @@ function Dictionary() {
             <div className="cx-dict-item"><b>10. Ukuran pinjaman menengah + Skor rendah → Gagal bayar</b><p>Kredit jumlah tanggung sangat sering macet di pertengahan masa tenor pada nasabah berprofil lemah.</p></div>
             <div className="cx-dict-item"><b>11 & 12. Kombinasi Spesifik EXT_SOURCE_3</b><p>Skor 3 secara terpisah dipadukan dengan <i>Barang Menengah</i> atau <i>Pekerja Baru</i> sudah cukup untuk memicu lonjakan probabilitas gagal bayar.</p></div>
 
-            <h4 style={{ color: "#9B5DE5", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Perilaku (Wawasan Produk)</h4>
+            <h4 style={{ color: "#4D7C0F", margin: "16px 0 0", fontSize: "14px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Aturan Perilaku (Wawasan Produk)</h4>
             <div className="cx-dict-item"><b>13 & 14. (Gaji rendah / Muda) + Revolving → Anuitas kecil</b><p>Nasabah muda atau bergaji pas-pasan menjadikan kartu kredit (revolving) sebagai tameng transaksi karena cicilan minimalnya (anuitas) sangat rendah dibanding kredit tunai.</p></div>
             <div className="cx-dict-item"><b>15 & 16. Utang rendah + (SMA / Tanpa Mobil) → Pinjaman kecil</b><p>Nasabah tanpa aset besar dan pendidikan SMA cenderung sadar diri dan sangat konservatif; mereka selalu menghindari pinjaman berjumlah besar.</p></div>
             <div className="cx-dict-item"><b>17 & 18. (Skor rendah / Tanpa anak) + Tinggal dgn ortu → Umur muda</b><p>Korelasi sosiologis yang sangat kuat: Mereka yang masih numpang di rumah orang tua dan belum punya anak didominasi secara absolut oleh demografi usia muda.</p></div>
@@ -1322,6 +2186,7 @@ const TAB_ICON: Record<TabId, string> = {
   phase2: "cluster",
   phase3: "link",
   phase4: "search",
+  knowledge: "target",
   dictionary: "book",
 };
 
@@ -1383,6 +2248,7 @@ export default function Dashboard() {
             {tab === "phase2" && <Phase2 />}
             {tab === "phase3" && <Phase3 />}
             {tab === "phase4" && <Phase4 />}
+            {tab === "knowledge" && <Knowledge />}
             {tab === "dictionary" && <Dictionary />}
           </main>
 
@@ -1397,10 +2263,13 @@ export default function Dashboard() {
 
 const styles = `
 .cx{
-  --page:#F2F4EC; --sidebar-a:#0C1712; --sidebar-b:#132A20; --card:#FFFFFF; --card2:#EEF1E7; --line:#E4E8DC;
-  --ink:#141A14; --muted:#6E7768; --dim:#9AA391;
-  --blue:#16A34A; --purple:#9B5DE5; --grad:#16A34A;
-  --up:#1FB894; --down:#FF6B6B; --warn:#F5A524;
+  /* one palette, green-anchored — mirrors the C token object in TS */
+  --page:#F3F5EE; --sidebar-a:#0C1712; --sidebar-b:#142C21; --card:#FFFFFF; --card2:#EDF1E6; --line:#DFE5D4;
+  --ink:#12211A; --muted:#6B7666; --dim:#9AA48F;
+  --safe:#15803D; --risk:#E11D48; --warn:#D97706; --info:#0F766E; --olive:#4D7C0F;
+  /* legacy aliases kept so existing rules keep resolving */
+  --blue:var(--safe); --purple:var(--olive); --grad:var(--safe);
+  --up:var(--safe); --down:var(--risk);
   --body:var(--font-geist-sans),system-ui,sans-serif;
   min-height:100vh; background:var(--page); font-family:var(--body); color:var(--ink);
   padding:0; -webkit-font-smoothing:antialiased;
@@ -1467,9 +2336,11 @@ const styles = `
 .cx-kpi-val{font-size:26px; font-weight:700; letter-spacing:-.02em;}
 .cx-chip{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:4px 9px; border-radius:999px; margin-top:10px; max-width:100%; white-space:normal; line-height:1.35;}
 .cx-chip b{font-size:11px;}
-.cx-chip-up{color:var(--up); background:rgba(31,184,148,.12);}
-.cx-chip-down{color:var(--down); background:rgba(255,107,107,.12);}
-.cx-chip-warn{color:var(--warn); background:rgba(245,165,36,.12);}
+.cx-chip-up{color:var(--safe); background:rgba(21,128,61,.11);}
+.cx-chip-down{color:var(--risk); background:rgba(225,29,72,.10);}
+.cx-chip-warn{color:var(--warn); background:rgba(217,119,6,.11);}
+.cx-chip-info{color:var(--info); background:rgba(15,118,110,.11);}
+.cx-chip-olive{color:var(--olive); background:rgba(77,124,15,.12);}
 .cx-chip-flat{color:var(--muted); background:var(--card2);}
 
 /* sparkline motif */
@@ -1479,6 +2350,8 @@ const styles = `
 .cx-spark-down{color:var(--down);}
 .cx-spark-warn{color:var(--warn);}
 .cx-spark-flat{color:var(--dim);}
+.cx-spark-info{color:var(--info);}
+.cx-spark-olive{color:var(--olive);}
 .cx-kpi-feature .cx-spark{color:rgba(234,242,236,.55) !important;}
 
 /* cards / grid */
@@ -1634,6 +2507,135 @@ const styles = `
 .cx-table td:nth-child(2){font-weight:700; color:var(--ink); white-space:nowrap;}
 .cx-th-sort{cursor:pointer; user-select:none;}
 .cx-th-sort:hover{color:var(--ink);}
+.cx-table-compact td{padding:10px 12px;}
+.cx-mono{font-family:var(--mono,ui-monospace,monospace); font-size:12px;}
+.cx-tag{display:inline-block; font-size:10px; font-weight:600; letter-spacing:.02em; text-transform:uppercase; border:1px solid var(--line); border-radius:999px; padding:2px 8px; margin-left:8px; color:var(--muted); white-space:nowrap;}
+.cx-tag-info{color:var(--info); border-color:var(--info);}
+.cx-tag-warn{color:var(--warn); border-color:var(--warn);}
+
+/* stage 1 — cleaning audit */
+.cx-auditbox{display:flex; gap:20px; align-items:flex-start; background:var(--card2); border:1px solid var(--line); border-radius:14px; padding:18px 20px;}
+.cx-auditmetric{display:flex; flex-direction:column; align-items:flex-start; min-width:120px; flex:none; padding-right:20px; border-right:1px solid var(--line);}
+.cx-auditnum{font-size:28px; font-weight:700; letter-spacing:-.02em; color:var(--ink); line-height:1.1;}
+.cx-auditunit{font-size:11px; color:var(--muted); margin-top:5px; line-height:1.35;}
+.cx-auditbody{flex:1; min-width:0;}
+.cx-auditdetail{margin:0; font-size:13px; color:var(--ink); line-height:1.6;}
+.cx-auditwhy{margin:10px 0 0; font-size:12.5px; color:var(--muted); line-height:1.6;}
+.cx-auditwhy b{color:var(--safe);}
+
+/* stage 2 — algorithm panel */
+.cx-algotabs{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:18px;}
+.cx-algotab{display:flex; align-items:center; gap:10px; appearance:none; cursor:pointer; text-align:left; font-family:var(--body); background:var(--card2); border:1.5px solid var(--line); border-radius:13px; padding:12px 14px; color:var(--muted); transition:all .15s;}
+.cx-algotab:hover{border-color:var(--dim);}
+.cx-algotab-on{background:var(--card);}
+.cx-algodot{width:10px; height:10px; border-radius:50%; flex:none;}
+.cx-algotab b{display:block; font-size:13.5px; font-weight:600; color:inherit;}
+.cx-algotab em{display:block; font-style:normal; font-size:10.5px; color:var(--dim); margin-top:2px;}
+.cx-algobody{display:flex; flex-direction:column; gap:16px;}
+.cx-algoscope{margin:0; font-size:13px; color:var(--muted);}
+.cx-algoscope b{color:var(--ink);}
+.cx-paramlist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:12px;}
+.cx-paramlist li{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:13px 15px;}
+.cx-paramhead{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;}
+.cx-paramk{font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--dim); min-width:74px;}
+.cx-paramv{font-size:13.5px; font-weight:600; color:var(--ink);}
+.cx-paramwhy{margin:7px 0 0; font-size:12.5px; color:var(--muted); line-height:1.55;}
+.cx-algoresult{border:1px solid var(--line); border-left-width:4px; border-radius:12px; padding:14px 16px; background:var(--card2);}
+.cx-algoresult b{display:block; font-size:15px; margin:5px 0 8px;}
+.cx-algoresult p{margin:0; font-size:13px; color:var(--muted); line-height:1.6;}
+
+/* stage 5 — knowledge synthesis */
+.cx-hero{background:linear-gradient(158deg, var(--sidebar-a), var(--sidebar-b)); border-color:transparent; padding:26px 28px;}
+.cx-hero .cx-eyebrow{color:#7FD8A4;}
+.cx-heroline{margin:12px 0 0; font-size:clamp(17px,2.1vw,23px); line-height:1.5; color:#EAF2EC; max-width:62ch; font-weight:500;}
+.cx-heroline strong{color:#fff; font-weight:700;}
+.cx-herosub{margin:14px 0 0; font-size:13px; line-height:1.65; color:rgba(234,242,236,.62); max-width:74ch;}
+
+.cx-klist{display:flex; flex-direction:column; gap:10px;}
+.cx-kitem{background:var(--card2); border:1.5px solid var(--line); border-radius:14px; overflow:hidden; transition:border-color .2s;}
+.cx-kitem-on{background:var(--card);}
+.cx-khead{appearance:none; width:100%; display:flex; align-items:flex-start; gap:13px; background:none; border:none; cursor:pointer; padding:15px 17px; font-family:var(--body); text-align:left;}
+.cx-knum{display:grid; place-items:center; width:26px; height:26px; border-radius:50%; background:var(--line); color:var(--muted); font-size:12px; font-weight:700; flex:none; transition:all .2s;}
+.cx-ktexts{flex:1; min-width:0;}
+.cx-ktag{display:block; font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; margin-bottom:5px;}
+.cx-kheadline{display:block; font-size:14.5px; font-weight:600; color:var(--ink); line-height:1.45;}
+.cx-kbody{padding:0 17px 18px 56px;}
+.cx-kclaim{margin:0 0 16px; font-size:13.5px; color:var(--muted); line-height:1.65;}
+.cx-kevidence ul{list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:9px;}
+.cx-kevidence li{display:flex; gap:11px; align-items:flex-start; font-size:12.5px; color:var(--muted); line-height:1.55;}
+.cx-kphase{flex:none; font-size:10px; font-weight:700; letter-spacing:.03em; text-transform:uppercase; border:1px solid; border-radius:999px; padding:2px 9px; margin-top:1px;}
+.cx-kfoot{display:grid; grid-template-columns:1.35fr 1fr; gap:14px; margin-top:18px;}
+.cx-kaction{border-left:4px solid; padding-left:13px;}
+.cx-kaction p,.cx-kvalue p{margin:6px 0 0; font-size:12.5px; line-height:1.6;}
+.cx-kaction p{color:var(--ink);}
+.cx-kvalue p{color:var(--muted);}
+
+/* stage 5 — routes & limitations */
+.cx-routelist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:16px;}
+.cx-routelist li{display:flex; gap:12px; align-items:flex-start;}
+.cx-routedot{width:11px; height:11px; border-radius:50%; flex:none; margin-top:5px;}
+.cx-routelist b{font-size:13.5px;}
+.cx-routenum{display:block; font-size:11px; color:var(--dim); margin-top:3px; font-weight:600;}
+.cx-routelist p{margin:6px 0 0; font-size:12.5px; color:var(--muted); line-height:1.55;}
+.cx-limitlist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:13px;}
+.cx-limitlist li{font-size:12.5px; color:var(--muted); line-height:1.6; padding-left:15px; position:relative;}
+.cx-limitlist li:before{content:""; position:absolute; left:0; top:8px; width:5px; height:5px; border-radius:50%; background:var(--dim);}
+.cx-limitlist b{color:var(--ink);}
+
+/* stage 4 — skew evidence overlay bar */
+.cx-track{position:relative;}
+.cx-fill-over{position:absolute; left:0; top:0; height:100%;}
+
+/* stage 4 — anomaly classes */
+.cx-classrow{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px;}
+.cx-classbtn{appearance:none; cursor:pointer; text-align:left; font-family:var(--body); background:var(--card2); border:1.5px solid var(--line); border-radius:13px; padding:13px 15px; transition:all .15s;}
+.cx-classbtn:hover{border-color:var(--dim);}
+.cx-classbtn-on{background:var(--card);}
+.cx-classname{display:block; font-size:12px; font-weight:700; letter-spacing:.03em;}
+.cx-classcount{display:block; font-size:22px; font-weight:700; color:var(--ink); margin-top:6px; letter-spacing:-.02em;}
+.cx-classrate{display:block; font-size:11px; color:var(--muted); margin-top:3px;}
+.cx-ratebar{margin-bottom:20px;}
+.cx-ratebar-track{position:relative; height:8px; background:var(--card2); border:1px solid var(--line); border-radius:999px; margin-top:26px;}
+.cx-ratebar-mark{position:absolute; top:-4px; width:3px; height:16px; border-radius:2px; transform:translateX(-50%);}
+.cx-ratebar-mark span{position:absolute; top:-20px; left:50%; transform:translateX(-50%); font-size:10.5px; font-weight:700; white-space:nowrap; color:inherit;}
+.cx-ratebar-base{position:absolute; top:-9px; width:1px; height:26px; background:var(--dim); transform:translateX(-50%);}
+.cx-ratebar-base span{position:absolute; top:28px; left:50%; transform:translateX(-50%); font-size:10px; color:var(--dim); white-space:nowrap;}
+.cx-classdetail{border:1px solid var(--line); border-left-width:4px; border-radius:12px; background:var(--card2); padding:15px 17px;}
+.cx-classmeta{display:grid; grid-template-columns:2fr 1fr 1fr; gap:16px; padding-bottom:13px; border-bottom:1px solid var(--line);}
+.cx-classmeta p{margin:5px 0 0; font-size:12.5px; color:var(--ink); line-height:1.5;}
+.cx-classverdict{margin:13px 0 0; font-size:13px; color:var(--muted); line-height:1.6;}
+.cx-classexample{margin-top:13px; padding-top:13px; border-top:1px solid var(--line);}
+.cx-classexample p{margin:5px 0 0; font-size:12.5px; color:var(--muted); line-height:1.55;}
+.cx-checkgrid{display:grid; grid-template-columns:repeat(2,1fr); gap:7px; margin-top:14px;}
+.cx-checkitem{display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted); background:var(--card2); border:1px solid var(--line); border-radius:9px; padding:8px 11px;}
+.cx-checkitem b{margin-left:auto; color:var(--safe); font-size:12.5px;}
+.cx-checkmark{display:grid; place-items:center; flex:none;}
+
+/* stage 3 — metric explainer */
+.cx-metricrow{display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-bottom:16px;}
+.cx-metricbtn{appearance:none; cursor:pointer; text-align:left; font-family:var(--body); background:var(--card2); border:1.5px solid var(--line); border-radius:12px; padding:11px 13px; color:var(--muted); transition:all .15s;}
+.cx-metricbtn:hover{border-color:var(--dim);}
+.cx-metricbtn-on{background:var(--card);}
+.cx-metricbtn b{display:block; font-size:13.5px; font-weight:700; color:inherit;}
+.cx-metricbtn em{display:block; font-style:normal; font-size:10.5px; color:var(--dim); margin-top:3px; line-height:1.35;}
+.cx-metricbody{border:1px solid var(--line); border-left-width:4px; border-radius:12px; background:var(--card2); padding:14px 16px;}
+.cx-metricformula{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:9px;}
+.cx-metricbody p{margin:0; font-size:13px; color:var(--muted); line-height:1.6;}
+
+/* stage 2 — segmentation criteria list */
+.cx-critlist{list-style:none; margin:16px 0 0; padding:0; display:flex; flex-direction:column; gap:12px;}
+.cx-critlist li{display:flex; gap:12px; align-items:flex-start;}
+.cx-critnum{display:grid; place-items:center; width:22px; height:22px; border-radius:50%; background:var(--safe); color:#fff; font-size:11.5px; font-weight:700; flex:none; margin-top:1px;}
+.cx-critlist b{font-size:13px;}
+.cx-critlist p{margin:4px 0 0; font-size:12.5px; color:var(--muted); line-height:1.5;}
+
+/* stage 1 — transformation list */
+.cx-translist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:14px;}
+.cx-translist li{padding-bottom:14px; border-bottom:1px solid var(--line);}
+.cx-translist li:last-child{border-bottom:none; padding-bottom:0;}
+.cx-transhead{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+.cx-transtitle{font-size:13.5px; font-weight:600;}
+.cx-transdetail{margin:7px 0 0; font-size:12.5px; color:var(--muted); line-height:1.55; transition:opacity .2s;}
 
 /* about — segmented control */
 .cx-segmented{display:flex; gap:4px; flex-wrap:wrap;}
@@ -1684,5 +2686,10 @@ const styles = `
   .cx-personas-2{grid-template-columns:1fr;}
   .cx-sidebar{display:none;}
   .cx-main{padding:20px 18px 40px;}
+  .cx-algotabs,.cx-metricrow,.cx-classrow{grid-template-columns:1fr;}
+  .cx-classmeta,.cx-kfoot,.cx-checkgrid{grid-template-columns:1fr;}
+  .cx-kbody{padding-left:17px;}
+  .cx-auditbox{flex-direction:column; gap:14px;}
+  .cx-auditmetric{border-right:none; border-bottom:1px solid var(--line); padding:0 0 12px; min-width:0;}
 }
 `;
